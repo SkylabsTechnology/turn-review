@@ -22,6 +22,13 @@ Requires Paseo **>= 0.12.0**.
   these rows — a successful rollback removes the row (the denied change shows
   under *Restore a denied change* until the next turn), so no separate chat
   notice is needed.
+- **Full-file diff viewer** — every tracker row has a *view difference* button
+  that opens a dedicated **Full File Diff** pane showing the whole file
+  side-by-side: the original on the left, the updated file on the right,
+  styled like VS Code's source-control diff editor. Both columns scroll
+  together; changed lines are block-aligned, tinted red (removed) / green
+  (added) with the changed characters highlighted, and line numbers and a
+  change indicator are colored per side.
 - **Settings screen** — write-mode gate, rollback project picker, per-file
   size cap, retention, and per-project storage cap.
 
@@ -60,6 +67,30 @@ so you can Deny it again (back to the original pre-turn state) or Accept it.
 Restore is idempotent — clicking *Restore* again shows *Already restored*
 instead of an error. Once a new turn starts, recovery is refused (window
 closed) to avoid clobbering newer work.
+
+### Viewing a full-file diff
+
+Each tracker row has a **view difference** button (the `FileDiff` icon, to the
+left of Accept/Deny). Clicking it opens a new **Full File Diff** workspace
+pane for that file, showing the whole file instead of just the hunks:
+
+- The **original** (the accumulated baseline before your turns) is on the
+  left; the **updated** file (the newest captured state) is on the right — the
+  same before/after the row's inline diff uses, so the two always agree.
+- Rows are **block-aligned** from the line diff like VS Code: removed lines
+  sit on the left, added lines on the right, interleaved per changed block,
+  with unchanged context lines paired between them. Both columns are one
+  scroll view, so they always scroll together.
+- Colors follow the active theme: removed lines are tinted red, added lines
+  green, and the **changed characters** within a modified line are highlighted
+  (word-level diff). Line numbers and a gutter change indicator are colored
+  per side, and each changed block is wrapped in a subtle band. The header
+  shows the file, the change kind, and `+N`/`−M` totals.
+- **Created** and **deleted** files render as a single all-added / all-removed
+  column. Binary or oversized files that cannot be shown as text, and files
+  whose baseline data is unavailable, show a clear message instead.
+- Very large files are capped at the first 2,000 lines per side with a
+  truncation notice to keep the pane responsive.
 
 ## Safety model
 
@@ -132,7 +163,7 @@ rollbacks, and the working tree are never touched.
 cd plugin
 npm install
 npm run typecheck
-npm test          # 107 unit/integration tests (deny/restore/rewind, tracker, gates, GC)
+npm test          # 129 unit/integration tests (diff viewer + alignment, deny/restore/rewind, tracker, gates, GC)
 ```
 
 ## Contributing
