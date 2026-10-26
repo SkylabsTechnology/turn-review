@@ -1,10 +1,11 @@
 import type { PluginClientContext } from '@getpaseo/plugin/client';
 import { ReviewPanel } from './client/review-panel';
+import { FileDiffPanel } from './client/file-diff-panel';
 import { TurnReviewSettingsScreen } from './client/settings-screen';
 import { createTurnReviewCard } from './client/turn-review-card';
 import { DenyNoticeCard } from './client/deny-notice-card';
-import { selectSharedFile } from './client/selection';
-import { TURN_REVIEW_PANEL, TURN_REVIEW_TIMELINE_KIND, TURN_REVIEW_TIMELINE_VERSION, turnReviewCardSchema, TURN_REVIEW_DENY_KIND, TURN_REVIEW_DENY_VERSION, turnReviewDenyCardSchema } from './shared/timeline';
+import { selectSharedFile, setClientContext } from './client/selection';
+import { TURN_REVIEW_PANEL, TURN_REVIEW_DIFF_PANEL, TURN_REVIEW_TIMELINE_KIND, TURN_REVIEW_TIMELINE_VERSION, turnReviewCardSchema, TURN_REVIEW_DENY_KIND, TURN_REVIEW_DENY_VERSION, turnReviewDenyCardSchema } from './shared/timeline';
 
 /**
  * Workspace-scoped Turn Review panel (Paseo 0.12 `addWorkspacePanel`).
@@ -20,6 +21,7 @@ import { TURN_REVIEW_PANEL, TURN_REVIEW_TIMELINE_KIND, TURN_REVIEW_TIMELINE_VERS
  * native panel open; the chat card itself is the mobile-friendly surface).
  */
 export default function contribute(client: PluginClientContext) {
+  setClientContext(client);
   const removePanel = client.addWorkspacePanel({
     id: TURN_REVIEW_PANEL,
     title: 'Turn Review',
@@ -27,6 +29,14 @@ export default function contribute(client: PluginClientContext) {
     context: 'workspace',
     locations: ['workspace', 'explorer'],
     Component: ReviewPanel,
+  });
+  const removeDiffPanel = client.addWorkspacePanel({
+    id: TURN_REVIEW_DIFF_PANEL,
+    title: 'Full File Diff',
+    icon: 'FileDiff',
+    context: 'workspace',
+    locations: ['workspace', 'explorer'],
+    Component: FileDiffPanel,
   });
   const removeCard = client.addTimelineRenderer({
     kind: TURN_REVIEW_TIMELINE_KIND,
@@ -75,6 +85,8 @@ export default function contribute(client: PluginClientContext) {
     removeCommand();
     removeDenyCard();
     removeCard();
+    removeDiffPanel();
     removePanel();
+    setClientContext(null);
   };
 }

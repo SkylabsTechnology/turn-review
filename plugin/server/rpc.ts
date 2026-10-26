@@ -16,6 +16,7 @@ import {
   restoreBackupRpc,
   trackerListRpc,
   trackerDiffRpc,
+  trackerFullFileRpc,
   trackerAcceptRpc,
   trackerDenyRpc,
   trackerAcceptAllRpc,
@@ -208,6 +209,19 @@ export function wireRpc(server: PluginServerContext, options: RpcWireOptions): R
     const result = await engine.trackerDiff(workspaceId, path);
     if ('error' in result) throw new Error(result.error);
     return result;
+  });
+  server.handle(trackerFullFileRpc, async ({ workspaceId, path }, ctx) => {
+    capturePaseo(ctx);
+    const result = await engine.trackerFullFile(workspaceId, path);
+    return {
+      error: result.error,
+      before: result.before,
+      after: result.after,
+      kind: result.kind,
+      truncated: result.truncated,
+      hunks: result.hunks,
+      fullReplace: result.fullReplace,
+    };
   });
   server.handle(trackerAcceptRpc, async ({ workspaceId, path, operationId }, ctx) => {
     capturePaseo(ctx);

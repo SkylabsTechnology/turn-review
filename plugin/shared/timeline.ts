@@ -18,6 +18,8 @@ export const TURN_REVIEW_DENY_KIND = 'turn-review-deny';
 export const TURN_REVIEW_DENY_VERSION = 1;
 /** id used for the workspace panel; the chat card opens it via openPanel(). */
 export const TURN_REVIEW_PANEL = 'turn-review';
+/** id of the side-by-side full-file diff pane (opened by the row diff button). */
+export const TURN_REVIEW_DIFF_PANEL = 'turn-review-diff';
 /** Files kept in a card row; the rest are only counted ("and N more"). */
 export const TURN_REVIEW_MAX_CARD_FILES = 20;
 

@@ -1,4 +1,6 @@
 import { useSyncExternalStore } from 'react';
+import type { PluginClientContext } from '@getpaseo/plugin/client';
+import { TURN_REVIEW_DIFF_PANEL } from '../shared/timeline';
 
 /**
  * The clicked file travels from a chat card to the Turn Review panel through
@@ -55,4 +57,52 @@ function subscribeTick(listener: () => void): () => void {
 /** Re-renders + lets a component react whenever a new review card appears. */
 export function useTrackerTick(): number {
   return useSyncExternalStore(subscribeTick, () => trackerTick);
+}
+
+// ---------------------------------------------------------------------------
+// Side-by-side full-file diff pane
+//
+// The row diff button asks the plugin client to open the dedicated diff panel
+// (a second workspace panel, `turn-review-diff`) and hands it the file through
+// this same module-level-store mechanism, because `openPanel` only accepts a
+// panel id + workspace id. The `client` context is stashed on registration
+// (contribute) so both the workspace panel and the embedded chat card can open
+// the diff pane — mirrors how the server stashes `paseo` in paseoHolder.
+// ---------------------------------------------------------------------------
+
+export interface DiffSelection {
+  workspaceId: string;
+  path: string;
+  nonce: number;
+}
+
+let diffSelection: DiffSelection | null = null;
+const diffListeners = new Set<() => void>();
+let clientContext: PluginClientContext | null = null;
+
+/** Stash the plugin client context on registration (call from contribute). */
+export function setClientContext(client: PluginClientContext | null): void {
+  clientContext = client;
+}
+
+function subscribeDiff(listener: () => void): () => void {
+  diffListeners.add(listener);
+  return () => diffListeners.delete(listener);
+}
+
+/** The file the side-by-side viewer should show, if any. */
+export function useDiffSelection(): DiffSelection | null {
+  return useSyncExternalStore(subscribeDiff, () => diffSelection);
+}
+
+/** Record the file to view (repeat taps bump the nonce so a stale pane reloads). */
+export function selectDiffFile(workspaceId: string, path: string): void {
+  diffSelection = { workspaceId, path, nonce: (diffSelection?.nonce ?? 0) + 1 };
+  for (const listener of diffListeners) listener();
+}
+
+/** Select the file and open the side-by-side diff pane in the same workspace. */
+export function openFileDiffPane(workspaceId: string, path: string): void {
+  selectDiffFile(workspaceId, path);
+  clientContext?.openPanel(TURN_REVIEW_DIFF_PANEL, { workspaceId });
 }

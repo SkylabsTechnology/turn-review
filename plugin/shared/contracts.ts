@@ -257,6 +257,24 @@ export const trackerDiffRpc = defineRpc({
   }),
 });
 
+/** Full before/after file text for the side-by-side viewer (tracker baseline vs newest captured state). */
+export const trackerFullFileRpc = defineRpc({
+  name: 'turn-review.tracker-full-file',
+  input: z.object({ workspaceId: z.string().min(1), path: z.string().min(1) }),
+  output: z.object({
+    error: z.string().nullable(),
+    before: z.string().nullable(),
+    after: z.string().nullable(),
+    kind: z.enum(['modified', 'created', 'deleted']).nullable(),
+    truncated: z.boolean(),
+    // Line-level diff so the client can render VS Code-style aligned rows.
+    hunks: z.array(hunkSchema),
+    fullReplace: z.boolean(),
+  }),
+});
+
+export type TrackerFullFileDto = z.infer<typeof trackerFullFileRpc.output>;
+
 export const trackerAcceptRpc = defineRpc({
   name: 'turn-review.tracker-accept',
   input: z.object({

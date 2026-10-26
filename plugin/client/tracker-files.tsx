@@ -17,7 +17,7 @@ import {
 import { trackerOpId } from '../shared/op-id';
 import type { Hunk, OperationResult } from '../shared/types';
 import { countColor, rowLabel } from './row-label';
-import { useTrackerTick } from './selection';
+import { openFileDiffPane, useTrackerTick } from './selection';
 
 type TrackerTheme = PluginWorkspacePanelProps['theme'];
 type TrackerLayout = PluginWorkspacePanelProps['layout'];
@@ -380,6 +380,16 @@ export function TrackerFiles({ workspaceId, theme, layout, focusPath, embedded, 
                 </View>
               </Pressable>
               <View style={{ flexDirection: 'row' as const, gap: 6 }}>
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel={`View full diff for ${file.path}`}
+                  hitSlop={8}
+                  disabled={busy}
+                  onPress={() => openFileDiffPane(workspaceId, file.path)}
+                  style={[s.iconButton, busy && s.iconButtonDisabled, { borderColor: theme.colors.border }]}
+                >
+                  <Icon name="FileDiff" size={18} color={theme.colors.foregroundMuted} />
+                </Pressable>
                 {file.deniable ? (
                   <>
                     <Pressable

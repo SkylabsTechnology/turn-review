@@ -16,6 +16,9 @@ import {
   isWindows,
 } from './path-safety';
 import { digest, newId, nowIso, redact } from './util';
+
+/** Side-by-side viewer renders at most this many lines per side. */
+const FULL_FILE_MAX_LINES = 2000;
 import type {
   Review,
   FileChange,
@@ -1161,6 +1164,64 @@ export class ReviewEngine {
     const afterText = currentBytes!.toString('utf8');
     const { hunks, fullReplace } = computeHunks(beforeText, afterText, path, baseline.file.beforeHash, current.file.afterHash);
     return { hunks, beforeLines: splitLines(beforeText).length, afterLines: splitLines(afterText).length, fullReplace, kind: 'modified' };
+  }
+
+  /**
+   * Full before/after text for the side-by-side file viewer. Mirrors
+   * `trackerDiff`'s baseline/current selection so the full view always matches
+   * what the row's diff shows: oldest pending before-state on the left, newest
+   * captured after-state on the right. Created/deleted rows return a single
+   * populated side. Non-text files are refused ('unsupported').
+   */
+  async trackerFullFile(workspaceId: string, path: string): Promise<
+    | { error: string; before: null; after: null; kind: null; truncated: false; hunks: []; fullReplace: false }
+    | {
+        error: null;
+        before: string | null;
+        after: string | null;
+        kind: 'modified' | 'created' | 'deleted';
+        truncated: boolean;
+        hunks: Hunk[];
+        fullReplace: boolean;
+      }
+  > {
+    const occ = this.pendingOccurrences(workspaceId, path);
+    if (occ.length === 0) return { error: 'not-tracked', before: null, after: null, kind: null, truncated: false, hunks: [], fullReplace: false };
+    const baseline = occ[0];
+    const current = occ[occ.length - 1];
+    const baselinePresent = baseline.file.kind !== 'created';
+    const currentPresent = current.file.kind !== 'deleted';
+    // Created-then-deleted net-no-change: no tracker row exists, so nothing to view.
+    if (!baselinePresent && !currentPresent) return { error: 'not-tracked', before: null, after: null, kind: null, truncated: false, hunks: [], fullReplace: false };
+    if (baseline.file.fileKind !== 'text' || current.file.fileKind !== 'text') {
+      return { error: 'unsupported', before: null, after: null, kind: null, truncated: false, hunks: [], fullReplace: false };
+    }
+    const baselineBytes = baseline.file.beforeHash ? this.storage.blobs.get(baseline.file.beforeHash) : null;
+    const currentBytes = current.file.afterHash ? this.storage.blobs.get(current.file.afterHash) : null;
+    if (baselinePresent && !baselineBytes) return { error: 'missing-blob', before: null, after: null, kind: null, truncated: false, hunks: [], fullReplace: false };
+    if (currentPresent && !currentBytes) return { error: 'missing-blob', before: null, after: null, kind: null, truncated: false, hunks: [], fullReplace: false };
+
+    let before = baselinePresent && baselineBytes ? baselineBytes.toString('utf8') : null;
+    let after = currentPresent && currentBytes ? currentBytes.toString('utf8') : null;
+    // Bound the rendered surface: keep the first FULL_FILE_MAX_LINES of each side.
+    let truncated = false;
+    if (before != null && splitLines(before).length > FULL_FILE_MAX_LINES) {
+      before = splitLines(before).slice(0, FULL_FILE_MAX_LINES).join('\n');
+      truncated = true;
+    }
+    if (after != null && splitLines(after).length > FULL_FILE_MAX_LINES) {
+      after = splitLines(after).slice(0, FULL_FILE_MAX_LINES).join('\n');
+      truncated = true;
+    }
+    const kind: 'modified' | 'created' | 'deleted' = !baselinePresent ? 'created' : !currentPresent ? 'deleted' : 'modified';
+    let hunks: Hunk[] = [];
+    let fullReplace = false;
+    if (kind === 'modified' && before != null && after != null) {
+      const result = computeHunks(before, after, path, baseline.file.beforeHash, current.file.afterHash);
+      hunks = result.hunks;
+      fullReplace = result.fullReplace;
+    }
+    return { error: null, before, after, kind, truncated, hunks, fullReplace };
   }
 
   /** Metadata-only accept: advance the baseline to the current state everywhere. */
