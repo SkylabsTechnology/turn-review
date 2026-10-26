@@ -1,0 +1,48 @@
+# Node
+node_modules/
+plugin/node_modules/
+
+# Public plugin repo: only the plugin + README + LICENSE + .gitignore ship.
+# Everything below is a dev/build artifact of the agent workspace. These stay
+# on disk locally but are not tracked in the public repository.
+AGENTS.md
+.pi/
+agent/
+config-examples/
+docs/
+prototype/
+reference/
+scripts/
+/package.json
+plugin/README.md
+
+# Fetched upstream references and demo fixtures (never shipped)
+_upstream/
+_scratch/
+
+# Build output / scratch
+.build/
+coverage/
+dist/
+*.log
+*.tmp
+*.bak
+*.tsbuildinfo
+
+# Environment / secrets
+.pi/mcp.env
+.pi/mcp.json
+.pi/mcp-servers.json
+.pi/models.json
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+*.pfx
+
+# OS
+.DS_Store
+
+.pi/
+agent/
