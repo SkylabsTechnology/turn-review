@@ -1,5 +1,4 @@
 import type { PluginServerContext, PluginHandlerContext } from '@getpaseo/plugin/server';
-import type { PaseoApi } from '@getpaseo/client';
 import { ReviewEngine, type SettingsSnapshot } from './review-engine';
 import { openStorage, type Storage } from './storage';
 import { turnReviewSettings } from '../shared/settings';
@@ -39,6 +38,14 @@ export interface RpcWireOptions {
  * The daemon PaseoApi is only exposed per handler/hook invocation. Handlers
  * store it here so the engine's idle check can query live agent state.
  */
+
+/**
+ * The daemon SDK type, resolved through the allowed server entry. `@getpaseo/client`
+ * is a client SDK entry and cannot be imported from server code (Paseo build
+ * boundary), even as a type — so PaseoApi is derived from the handler context.
+ */
+type PaseoApi = PluginHandlerContext['paseo'];
+
 export const paseoHolder: { current: PaseoApi | null } = { current: null };
 
 function capturePaseo(context: PluginHandlerContext): void {
