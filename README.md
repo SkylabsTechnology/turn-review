@@ -34,16 +34,16 @@ Requires Paseo **>= 0.12.0**.
 
 ## Screenshots
 
-![Turn Review — default view: the per-turn review card in the chat and the Turn Review panel, all file diffs collapsed](plugin-images/turn-review-main.png)
+![Turn Review — default view: the per-turn review card in the chat and the Turn Review panel, all file diffs collapsed](plugin/assets/turn-review-main.png)
 
 *Default view — the per-turn review card in the chat and the Turn Review
 panel, with all file diffs collapsed.*
 
-![Turn Review — the same view with the file diffs expanded](plugin-images/turn-review-main_2.png)
+![Turn Review — the same view with the file diffs expanded](plugin/assets/turn-review-main_2.png)
 
 *The same view with the file diffs expanded in the panel.*
 
-![Full File Diff — side-by-side diff of the files an agent changed](plugin-images/full-file-diff-view.png)
+![Full File Diff — side-by-side diff of the files an agent changed](plugin/assets/full-file-diff-view.png)
 
 *The Full File Diff tab — the whole-file side-by-side diff of the files an
 agent changed.*
