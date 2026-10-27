@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { languageForPath, tokenizeLine, tokenizeFile, buildLineSpans } from '../client/syntax';
+import { languageForPath, tokenizeLine, tokenizeFile, buildLineSpans, tokenColor } from '../client/syntax';
 
 test('S01: language detection by extension', () => {
   assert.equal(languageForPath('src/app.ts'), 'typescript');
@@ -58,6 +58,29 @@ test('S06: plain language renders as a single plain token per line', () => {
   assert.equal(out[1][0].kind, 'plain');
 });
 
+test('S08: token colors resolve the default theme (one) by app light/dark', () => {
+  const dark = {
+    surface0: '#1e1e1e', surface1: '#252526', surface2: '#2d2d2d', border: '#333333',
+    foreground: '#d4d4d4', foregroundMuted: '#808080', accent: '#569cd6', accentForeground: '#ffffff',
+    statusSuccess: '#4ec9b0', statusWarning: '#dcdcaa', statusDanger: '#f48771',
+  };
+  assert.equal(tokenColor('keyword', dark), '#c678dd'); // One Dark keyword
+  assert.equal(tokenColor('string', dark), '#98c379');
+  assert.equal(tokenColor('comment', dark), '#5c6370');
+  assert.equal(tokenColor('number', dark), '#d19a66');
+  assert.equal(tokenColor('plain', dark), '#abb2bf');
+
+  const light = { ...dark, surface0: '#ffffff', foreground: '#000000' };
+  assert.equal(tokenColor('keyword', light), '#a626a4'); // One Light keyword
+  assert.equal(tokenColor('string', light), '#50a14f');
+  assert.equal(tokenColor('comment', light), '#a0a1a7');
+  assert.equal(tokenColor('plain', light), '#383a42');
+
+  // An explicit theme is honoured regardless of the app theme.
+  assert.equal(tokenColor('keyword', dark, 'github'), '#ff7b72');
+  assert.equal(tokenColor('string', dark, 'dracula'), '#f1fa8c');
+});
+
 test('S07: buildLineSpans overlays intra-line highlight ranges on top of syntax tokens', () => {
   const colors = {
     surface0: '#000', surface1: '#111', surface2: '#222', border: '#333',
@@ -74,4 +97,52 @@ test('S07: buildLineSpans overlays intra-line highlight ranges on top of syntax 
   assert.deepEqual(changed, ['42']);
   const rowBg = spans.filter((s) => s.background === 'rgba(1,2,3,0.14)');
   assert.ok(rowBg.length > 0); // the rest of the line keeps the row tint
+});
+
+test('S09: JS/TS roles match Lezer-style tagging (imports, definitions, literals, members, types)', () => {
+  const scan = (lang: string, line: string) => tokenizeLine(lang, line, { inBlock: false, inTag: false, inFence: false }).tokens;
+  const kindsOf = (tokens: { kind: string; text: string }[]) => tokens.map((t) => `${t.kind}:${t.text}`);
+
+  // The reported line: import bindings are definitions (blue), NOT types (yellow).
+  let kinds = kindsOf(scan('typescript', "import { ComponentFixture, TestBed } from '@angular/core/testing';"));
+  assert.ok(kinds.includes('keyword:import'));
+  assert.ok(kinds.includes('definition:ComponentFixture'));
+  assert.ok(kinds.includes('definition:TestBed'));
+  assert.ok(kinds.includes('keyword:from'));
+  assert.ok(kinds.some((k) => k.startsWith('string:') && k.includes('@angular/core/testing')));
+  assert.ok(!kinds.includes('type:ComponentFixture'));
+
+  // default import + namespace import
+  kinds = kindsOf(scan('typescript', 'import App from "./app"; import * as ns from "mod";'));
+  assert.ok(kinds.includes('definition:App'));
+  assert.ok(kinds.includes('definition:ns'));
+
+  // class/interface/type/enum declarations and type annotations are types (yellow)
+  assert.ok(kindsOf(scan('typescript', 'class Foo extends Bar implements Baz {')).includes('type:Foo'));
+  assert.ok(kindsOf(scan('typescript', 'interface Opts {')).includes('type:Opts'));
+  assert.ok(kindsOf(scan('typescript', 'type Alias = string;')).includes('type:Alias'));
+  assert.ok(kindsOf(scan('typescript', 'enum Color {')).includes('type:Color'));
+  assert.ok(kindsOf(scan('typescript', 'const x: Widget = makeWidget();')).includes('type:Widget'));
+
+  // variable/function definitions are definitions (blue)
+  kinds = kindsOf(scan('typescript', 'const cfg = build();'));
+  assert.ok(kinds.includes('definition:cfg'));
+  assert.ok(kinds.includes('function:build'));
+
+  // literals true/false/null use the literal role (number color)
+  kinds = kindsOf(scan('typescript', 'const ok = true; const no = false; const nil = null;'));
+  assert.ok(kinds.includes('literal:true'));
+  assert.ok(kinds.includes('literal:false'));
+  assert.ok(kinds.includes('literal:null'));
+
+  // member access is a property (attribute color); spread is not
+  kinds = kindsOf(scan('typescript', 'const r = obj.value + Math.PI;'));
+  assert.ok(kinds.includes('property:value'));
+  assert.ok(kinds.includes('type:Math'));
+  assert.ok(kinds.includes('property:PI'));
+  kinds = kindsOf(scan('typescript', 'const s = { ...rest };'));
+  assert.ok(!kinds.includes('property:rest'));
+
+  // `new Foo()` — Foo is a type (constructor reference), not a function call
+  assert.ok(kindsOf(scan('typescript', 'const a = new Date();')).includes('type:Date'));
 });

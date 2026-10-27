@@ -11,10 +11,46 @@ import { z } from 'zod';
  * modes run the same safety stack (capture completeness, ambiguity, repo
  * identity, writer-active, live-match/CAS); `disabled` never writes.
  */
+/** The exact syntax-highlight theme ids Paseo ships (packages/highlight/src/themes.ts). */
+const syntaxThemeIds = [
+  'github',
+  'catppuccin',
+  'dracula',
+  'tokyo-night',
+  'one',
+  'nord',
+  'gruvbox',
+  'solarized',
+] as const;
+
+/** A selectable syntax-highlight theme id (mirrors Paseo's SyntaxThemeId). */
+export type SyntaxThemeId = (typeof syntaxThemeIds)[number];
+
+/** Map pre-0.13 syntaxTheme values to the Paseo theme set (v1 → v2 migration). */
+const LEGACY_SYNTAX_THEME: Record<string, SyntaxThemeId> = {
+  auto: 'one',
+  'dark-modern': 'github',
+  'light-modern': 'github',
+  'github-dark': 'github',
+  'github-light': 'github',
+  monokai: 'dracula',
+  'solarized-dark': 'solarized',
+  'solarized-light': 'solarized',
+  nord: 'nord',
+  dracula: 'dracula',
+};
+
 export const turnReviewSettings = defineSettings({
   id: 'turn-review',
   scope: 'host',
-  version: 1,
+  version: 2,
+  migrate: (values, fromVersion) => {
+    if (fromVersion >= 2) return values;
+    const v = (values ?? {}) as Record<string, unknown>;
+    const old = v.syntaxTheme as string | undefined;
+    const syntaxTheme = (old && LEGACY_SYNTAX_THEME[old]) || 'one';
+    return { ...v, syntaxTheme };
+  },
   schema: z.object({
     /** Write mode: 'disabled' | 'fixture' (allowlist-scoped) | 'enabled' (real projects). */
     undoMode: z.enum(['disabled', 'fixture', 'enabled']).default('disabled'),
@@ -29,6 +65,13 @@ export const turnReviewSettings = defineSettings({
     maxProjectBytes: z.number().int().min(0).default(1024 * 1024 * 1024),
     /** Extra path fragments never captured (secret/sensitive names). */
     denyPaths: z.array(z.string().min(1)).default([]),
+    /**
+     * Syntax token palette for the full-file diff and Turn Review inline diffs.
+     * Uses Paseo's own highlight themes (github, catppuccin, dracula,
+     * tokyo-night, one, nord, gruvbox, solarized). Like Paseo, a theme is a
+     * single id resolved against the app's light/dark (dracula is fixed).
+     */
+    syntaxTheme: z.enum(syntaxThemeIds).default('one'),
   }),
 });
 

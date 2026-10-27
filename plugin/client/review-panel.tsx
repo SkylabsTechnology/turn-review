@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Pressable, Text, View } from 'react-native';
-import { type PluginWorkspacePanelProps, useRpc } from '@getpaseo/plugin/client';
+import { type PluginWorkspacePanelProps, useRpc, useWorkspace } from '@getpaseo/plugin/client';
 import { pluginInfoRpc } from '../shared/contracts';
 import { TrackerFiles } from './tracker-files';
 import { selectSharedFile, useSelectedFile } from './selection';
@@ -16,6 +16,14 @@ import { selectSharedFile, useSelectedFile } from './selection';
  */
 export function ReviewPanel({ theme, layout, workspaceId }: PluginWorkspacePanelProps) {
   const info = useRpc(pluginInfoRpc);
+
+  // Paseo classifies the workspace as `git` / `non_git` / `directory`. Turn
+  // Review requires a Git work tree; for a non-Git workspace show a clear
+  // banner instead of an empty-looking panel (a brand-new Paseo project is
+  // non-git until git init, which previously looked like the plugin was
+  // broken).
+  const projectKind = useWorkspace(workspaceId, (w) => w.projectKind);
+  const notGit = projectKind === 'non_git' || projectKind === 'directory';
 
   const [plugin, setPlugin] = useState<Awaited<ReturnType<typeof info>> | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -60,6 +68,7 @@ export function ReviewPanel({ theme, layout, workspaceId }: PluginWorkspacePanel
     button: { borderRadius: 8, paddingVertical: 10, paddingHorizontal: 12, minHeight: mobile ? 44 : undefined, borderWidth: 1, borderColor: theme.colors.border, alignItems: 'center' as const, justifyContent: 'center' as const },
     buttonText: { color: theme.colors.foreground, fontSize: 13 },
     header: { flexDirection: 'row' as const, justifyContent: 'space-between' as const, alignItems: 'center' as const, flexWrap: 'wrap' as const, gap: 8 },
+    banner: { borderRadius: 8, borderWidth: 1, borderColor: theme.colors.statusWarning, padding: 10, backgroundColor: 'transparent' },
   }), [theme, mobile]);
 
   return (
@@ -76,6 +85,13 @@ export function ReviewPanel({ theme, layout, workspaceId }: PluginWorkspacePanel
         </Text>
       ) : null}
       {error ? <Text style={s.error}>{error}</Text> : null}
+      {notGit ? (
+        <View style={s.banner}>
+          <Text style={[s.muted, { color: theme.colors.statusWarning }]}>
+            This workspace isn't a Git repository. Turn Review requires Git — initialize a repository in this workspace to capture and review turns here.
+          </Text>
+        </View>
+      ) : null}
       <TrackerFiles workspaceId={workspaceId} theme={theme} layout={layout} focusPath={focusPath} />
     </View>
   );

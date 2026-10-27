@@ -17,7 +17,9 @@ export type TokenKind =
   | 'string'
   | 'keyword'
   | 'number'
+  | 'literal'
   | 'function'
+  | 'definition'
   | 'type'
   | 'property'
   | 'tag'
@@ -123,6 +125,21 @@ function scanGeneric(language: string, line: string, state: TokenizeState): { to
   let i = 0;
   let inBlock = state.inBlock;
 
+  // JS/TS role tracking. Paseo highlights with CodeMirror/Lezer, whose tags map
+  // import bindings and variable/function definitions to the `definition` role
+  // (blue), true/false/null to `literal` (number color), member access to
+  // `property` (attribute color), and class/type declarations to `type`/`class`
+  // (yellow). We mirror the common cases with lightweight per-line state.
+  const tsLike = language === 'javascript' || language === 'typescript';
+  const TYPE_INTRO = new Set(['class', 'interface', 'type', 'enum', 'extends', 'implements', 'new', 'namespace']);
+  const DEF_INTRO = new Set(['const', 'let', 'var', 'function']);
+  let pendingImport = false;
+  let inImportBraces = false;
+  let nextIsType = false;
+  let nextIsDefinition = false;
+  let lastPunct: string | null = null;
+  let prevPunct: string | null = null;
+
   while (i < line.length) {
     if (inBlock) {
       const end = line.indexOf(cfg.blockEnd!, i);
@@ -175,16 +192,40 @@ function scanGeneric(language: string, line: string, state: TokenizeState): { to
       const m = IDENT_RE.exec(line.slice(i))!;
       const word = m[0];
       const after = line.slice(i + word.length);
-      let kind: TokenKind = 'plain';
-      if (keywords.has(word)) {
+      let kind: TokenKind;
+      if (tsLike && (word === 'true' || word === 'false' || word === 'null')) {
+        kind = 'literal';
+      } else if (keywords.has(word)) {
         kind = 'keyword';
-      } else if (flavor === 'css') {
-        if (line.slice(0, i).trimEnd().endsWith('@')) kind = 'keyword';
-        else if (/^\s*:/.test(after)) kind = 'property';
-      } else if (/^\s*\(/.test(after)) {
-        kind = 'function';
-      } else if (/^[A-Z]/.test(word) && word.length > 1 && !/^[A-Z0-9_$]+$/.test(word)) {
-        kind = 'type';
+        if (tsLike) {
+          if (word === 'import') pendingImport = true;
+          else if (word === 'from') { pendingImport = false; inImportBraces = false; }
+          else if (TYPE_INTRO.has(word)) nextIsType = true;
+          else if (DEF_INTRO.has(word)) nextIsDefinition = true;
+        }
+      } else {
+        if (flavor === 'css') {
+          if (line.slice(0, i).trimEnd().endsWith('@')) kind = 'keyword';
+          else if (/^\s*:/.test(after)) kind = 'property';
+          else kind = 'plain';
+        } else if (tsLike && (inImportBraces || pendingImport)) {
+          kind = 'definition'; // import bindings: `import { A, B }`, `import D`, `import * as NS`
+        } else if (tsLike && nextIsType) {
+          kind = 'type'; // after class/interface/type/enum/extends/implements/new
+        } else if (tsLike && nextIsDefinition) {
+          kind = 'definition'; // after const/let/var/function
+        } else if (/^\s*\(/.test(after)) {
+          kind = 'function';
+        } else if (tsLike && lastPunct === '.' && prevPunct !== '.') {
+          kind = 'property'; // member access `foo.bar` (not `...spread`)
+        } else if (/^[A-Z]/.test(word) && word.length > 1 && !/^[A-Z0-9_$]+$/.test(word)) {
+          kind = 'type'; // capitalized bare identifier → type reference
+        } else {
+          kind = 'plain';
+        }
+        // Consume any pending intro flag (class Foo, const x, new Foo).
+        nextIsType = false;
+        nextIsDefinition = false;
       }
       tokens.push({ text: word, kind });
       i += word.length;
@@ -196,6 +237,15 @@ function scanGeneric(language: string, line: string, state: TokenizeState): { to
       continue;
     }
     tokens.push({ text: ch, kind: 'punct' });
+    if (tsLike) {
+      if (ch === '{' && pendingImport && !inImportBraces) inImportBraces = true;
+      else if (ch === '}' && inImportBraces) { inImportBraces = false; pendingImport = false; }
+      else if (ch === ';' || ch === '=' || ch === '(' || ch === '.') { pendingImport = false; inImportBraces = false; }
+    }
+    nextIsType = false;
+    nextIsDefinition = false;
+    prevPunct = lastPunct;
+    lastPunct = ch;
     i += 1;
   }
   return { tokens, next: { ...state, inBlock } };
@@ -359,28 +409,15 @@ export function tokenizeFile(language: string, lines: string[]): Token[][] {
   return out;
 }
 
-/** Map a token kind to a color from the active theme (adapts to light/dark). */
-export function tokenColor(kind: TokenKind, colors: PanelTheme['colors']): string {
-  switch (kind) {
-    case 'comment':
-      return colors.foregroundMuted;
-    case 'string':
-      return colors.statusSuccess;
-    case 'keyword':
-    case 'type':
-      return colors.accent;
-    case 'number':
-      return colors.statusWarning;
-    case 'function':
-      return colors.accent;
-    case 'property':
-    case 'tag':
-      return colors.statusWarning;
-    case 'punct':
-      return colors.foregroundMuted;
-    default:
-      return colors.foreground;
-  }
+import { paletteFor, type SyntaxThemeId } from './highlight-themes';
+
+/**
+ * Color for a token kind under the selected highlight theme. Diff line
+ * backgrounds are still theme-derived (see file-diff-panel.tsx tints); only
+ * the code text uses the syntax palette.
+ */
+export function tokenColor(kind: TokenKind, colors: PanelTheme['colors'], themeId?: SyntaxThemeId): string {
+  return paletteFor(themeId ?? 'one', colors)[kind];
 }
 
 /** Convert a #rgb/#rrggbb hex color to an rgba() string at the given alpha. */
@@ -406,9 +443,9 @@ export interface LineSpan {
  * VS Code-style intra-line highlight: characters inside `changedRanges` get
  * `strongBg`, every other character on the line gets the row `bg`.
  */
-export function buildLineSpans(tokens: Token[], line: string, changedRanges: Array<[number, number]>, colors: PanelTheme['colors'], bg: string | null, strongBg: string | null): LineSpan[] {
+export function buildLineSpans(tokens: Token[], line: string, changedRanges: Array<[number, number]>, colors: PanelTheme['colors'], bg: string | null, strongBg: string | null, themeId?: SyntaxThemeId): LineSpan[] {
   if (changedRanges.length === 0) {
-    return tokens.map((t) => ({ text: t.text, color: tokenColor(t.kind, colors), background: bg }));
+    return tokens.map((t) => ({ text: t.text, color: tokenColor(t.kind, colors, themeId), background: bg }));
   }
   const boundaries = new Set<number>([0, line.length]);
   let off = 0;
@@ -438,7 +475,7 @@ export function buildLineSpans(tokens: Token[], line: string, changedRanges: Arr
     const inChanged = changedRanges.some(([cs, ce]) => s >= cs && e <= ce);
     spans.push({
       text: line.slice(s, e),
-      color: tokenColor(kind, colors),
+      color: tokenColor(kind, colors, themeId),
       background: inChanged ? strongBg : bg,
     });
   }

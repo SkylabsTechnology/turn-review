@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Pressable, ScrollView, Text, View } from 'react-native';
-import { type PluginWorkspacePanelProps, useRpc } from '@getpaseo/plugin/client';
+import { type PluginWorkspacePanelProps, useRpc, useSettings } from '@getpaseo/plugin/client';
 import { Icon } from '@getpaseo/plugin/client/react-native';
 import {
   trackerListRpc,
@@ -15,9 +15,11 @@ import {
   type TrackerFileDto,
 } from '../shared/contracts';
 import { trackerOpId } from '../shared/op-id';
+import { turnReviewSettings } from '../shared/settings';
 import type { Hunk, OperationResult } from '../shared/types';
 import { countColor, rowLabel } from './row-label';
 import { openFileDiffPane, useTrackerTick } from './selection';
+import { languageForPath, tokenColor, tokenizeLine } from './syntax';
 
 type TrackerTheme = PluginWorkspacePanelProps['theme'];
 type TrackerLayout = PluginWorkspacePanelProps['layout'];
@@ -72,6 +74,8 @@ const fileSig = (f: TrackerFileDto): string =>
  * accept semantics) so the change can still be acknowledged and dismissed.
  */
 export function TrackerFiles({ workspaceId, theme, layout, focusPath, embedded, onOpenFile }: Props) {
+  const syntaxSettings = useSettings(turnReviewSettings);
+  const syntaxTheme = syntaxSettings.status === 'ready' ? syntaxSettings.values.syntaxTheme : 'one';
   const list = useRpc(trackerListRpc);
   const diff = useRpc(trackerDiffRpc);
   const accept = useRpc(trackerAcceptRpc);
@@ -325,32 +329,39 @@ export function TrackerFiles({ workspaceId, theme, layout, focusPath, embedded, 
     };
   }, [theme, mobile, embedded]);
 
-  const renderDiff = (file: TrackerFileDto, data: DiffData) => (
-    <ScrollView style={s.diffBox} nestedScrollEnabled>
-      {data.fullReplace || data.hunks.length === 0 ? (
-        <Text style={s.note}>
-          {data.kind === 'created' ? 'File created since the last accept/deny.' : data.kind === 'deleted' ? 'File deleted since the last accept/deny.' : data.fullReplace ? 'Diff too large; whole-file replace.' : 'No line hunks.'}
-        </Text>
-      ) : null}
-      {data.hunks.map((hunk) => (
-        <View key={hunk.id} style={{ borderBottomWidth: 1, borderBottomColor: theme.colors.border }}>
-          <Text style={s.hunkHeader}>@@ -{hunk.oldStart},{hunk.oldCount} +{hunk.newStart},{hunk.newCount} @@</Text>
-          {hunk.removed.map((line, i) => (
-            <View key={`r${i}`} style={[s.lineRow, { backgroundColor: REMOVED_BG }]}>
-              <Text style={[s.sign, { color: REMOVED_SIGN }]}>−</Text>
-              <Text style={s.line}>{line || ' '}</Text>
-            </View>
-          ))}
-          {hunk.added.map((line, i) => (
-            <View key={`a${i}`} style={[s.lineRow, { backgroundColor: ADDED_BG }]}>
-              <Text style={[s.sign, { color: ADDED_SIGN }]}>+</Text>
-              <Text style={s.line}>{line || ' '}</Text>
-            </View>
-          ))}
+  const renderDiff = (file: TrackerFileDto, data: DiffData) => {
+    const lang = languageForPath(file.path);
+    const hunkLine = (line: string, sign: string, signColor: string, bg: string, key: string) => {
+      const text = line || ' ';
+      const tokens = lang ? tokenizeLine(lang, text, { inBlock: false, inTag: false, inFence: false }).tokens : [{ text, kind: 'plain' as const }];
+      return (
+        <View key={key} style={[s.lineRow, { backgroundColor: bg }]}>
+          <Text style={[s.sign, { color: signColor }]}>{sign}</Text>
+          <Text style={s.line}>
+            {tokens.map((t, j) => (
+              <Text key={j} style={{ color: tokenColor(t.kind, theme.colors, syntaxTheme) }}>{t.text}</Text>
+            ))}
+          </Text>
         </View>
-      ))}
-    </ScrollView>
-  );
+      );
+    };
+    return (
+      <ScrollView style={s.diffBox} nestedScrollEnabled>
+        {data.fullReplace || data.hunks.length === 0 ? (
+          <Text style={s.note}>
+            {data.kind === 'created' ? 'File created since the last accept/deny.' : data.kind === 'deleted' ? 'File deleted since the last accept/deny.' : data.fullReplace ? 'Diff too large; whole-file replace.' : 'No line hunks.'}
+          </Text>
+        ) : null}
+        {data.hunks.map((hunk) => (
+          <View key={hunk.id} style={{ borderBottomWidth: 1, borderBottomColor: theme.colors.border }}>
+            <Text style={s.hunkHeader}>@@ -{hunk.oldStart},{hunk.oldCount} +{hunk.newStart},{hunk.newCount} @@</Text>
+            {hunk.removed.map((line, i) => hunkLine(line, '−', REMOVED_SIGN, REMOVED_BG, `r${i}`))}
+            {hunk.added.map((line, i) => hunkLine(line, '+', ADDED_SIGN, ADDED_BG, `a${i}`))}
+          </View>
+        ))}
+      </ScrollView>
+    );
+  };
 
   const listSection = (
     <>

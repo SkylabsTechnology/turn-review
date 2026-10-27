@@ -48,18 +48,27 @@ function TurnReviewCardView({ theme, layout, data, open }: { theme: CardTheme; l
         <Text style={s.title}>Turn review</Text>
         <Text style={s.muted}>{new Date(data.endedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</Text>
       </View>
-      {data.captureStable === false ? (
+      {data.captureError === 'not-git-repository' ? (
         <Text style={s.warn}>
-          Baseline was captured while the agent may already have been writing — only verified untouched files can be rolled back.
+          This turn could not be captured for review because this workspace isn't a Git repository.
+          Turn Review requires Git — initialize a repository in this workspace to enable review and undo.
         </Text>
-      ) : null}
-      <TrackerFiles
-        workspaceId={data.workspaceId}
-        theme={theme}
-        layout={layout}
-        embedded
-        onOpenFile={(path) => open({ reviewId: data.reviewId, workspaceId: data.workspaceId, path })}
-      />
+      ) : (
+        <>
+          {data.captureStable === false ? (
+            <Text style={s.warn}>
+              Baseline was captured while the agent may already have been writing — only verified untouched files can be rolled back.
+            </Text>
+          ) : null}
+          <TrackerFiles
+            workspaceId={data.workspaceId}
+            theme={theme}
+            layout={layout}
+            embedded
+            onOpenFile={(path) => open({ reviewId: data.reviewId, workspaceId: data.workspaceId, path })}
+          />
+        </>
+      )}
     </View>
   );
 }

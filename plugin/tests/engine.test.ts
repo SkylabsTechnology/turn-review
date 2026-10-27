@@ -522,7 +522,7 @@ test('ambiguous overlapping agents disable Undo (C13)', async () => {
   }
 });
 
-test('non-git directory yields a read-only review with no Undo', async () => {
+test('non-git directory yields a read-only review marked not-git-repository (no Undo)', async () => {
   const harness = makeHarness();
   const root = path.join(os.tmpdir(), 'turn-review-nongit-' + Date.now());
   fs.mkdirSync(root, { recursive: true });
@@ -530,10 +530,47 @@ test('non-git directory yields a read-only review with no Undo', async () => {
     const captureId = await harness.engine.startTurn({ agentId: 'a1', workspaceId: 'ws-1', cwd: root, turnId: 't', barrier: 'proven' });
     writeFile(root, 'x.txt', 'hi\n');
     const review = await harness.engine.endTurn({ occurrenceId: captureId, agentId: 'a1', workspaceId: 'ws-1', cwd: root, outcome: 'completed', barrier: 'proven' });
+    // Capture stays fail-closed: read-only, never undo-able.
     assert.equal(review!.captureState, 'incomplete');
     assert.equal(review!.status, 'unsupported');
+    assert.equal(review!.captureError, 'not-git-repository');
+    assert.equal(review!.files.length, 0);
+    const undo = await harness.engine.undoFile(captureId, 'ws-1', review!.revision, 'op-nogit', 'x.txt', null, false);
+    assert.equal(undo.result.status, 'refused');
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
+    harness.cleanup();
+  }
+});
+
+test('non-git turn still yields a chat card explaining that Git is required', async () => {
+  const harness = makeHarness();
+  const root = path.join(os.tmpdir(), 'turn-review-nogit-card-' + Date.now());
+  fs.mkdirSync(root, { recursive: true });
+  try {
+    const captureId = await harness.engine.startTurn({ agentId: 'a1', workspaceId: 'ws-1', cwd: root, turnId: 't', barrier: 'event-best-effort' });
+    await harness.engine.endTurn({ occurrenceId: captureId, agentId: 'a1', workspaceId: 'ws-1', cwd: root, outcome: 'completed', barrier: 'event-best-effort' });
+    const card = await harness.engine.timelineCard(captureId);
+    assert.ok(card, 'a notice card is appended even though nothing was captured');
+    assert.equal(card!.captureError, 'not-git-repository');
+    assert.equal(card!.fileCount, 0);
+    assert.equal(card!.files.length, 0);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+    harness.cleanup();
+  }
+});
+
+test('missing workspace directory is marked missing-directory (read-only, no card)', async () => {
+  const harness = makeHarness();
+  const root = path.join(os.tmpdir(), 'turn-review-missing-' + Date.now() + '-does-not-exist');
+  try {
+    const captureId = await harness.engine.startTurn({ agentId: 'a1', workspaceId: 'ws-1', cwd: root, turnId: 't', barrier: 'proven' });
+    const review = await harness.engine.endTurn({ occurrenceId: captureId, agentId: 'a1', workspaceId: 'ws-1', cwd: root, outcome: 'completed', barrier: 'proven' });
+    assert.equal(review!.captureState, 'incomplete');
+    assert.equal(review!.captureError, 'missing-directory');
+    assert.equal(await harness.engine.timelineCard(captureId), null, 'no notice card for a missing directory');
+  } finally {
     harness.cleanup();
   }
 });

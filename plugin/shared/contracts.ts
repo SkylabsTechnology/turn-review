@@ -20,6 +20,7 @@ export const reviewSchema = z.object({
     'interrupted',
     'failed',
   ]),
+  captureError: z.enum(['not-git-repository', 'missing-directory']).nullable().optional(),
   ambiguous: z.boolean(),
   captureBarrier: z.enum(['proven', 'event-best-effort']),
   status: z.enum(['pending', 'kept', 'conflict', 'unsupported']),

@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Pressable, ScrollView, Text, View } from 'react-native';
-import { type PluginWorkspacePanelProps, useRpc } from '@getpaseo/plugin/client';
+import { type PluginWorkspacePanelProps, useRpc, useSettings } from '@getpaseo/plugin/client';
 import { Icon } from '@getpaseo/plugin/client/react-native';
 import { trackerFullFileRpc, type TrackerFullFileDto } from '../shared/contracts';
+import { turnReviewSettings } from '../shared/settings';
 import { languageForPath, tokenizeFile, buildLineSpans, hexToRgba, type LineSpan, type Token } from './syntax';
 import { buildAlignment, splitLines, wordDiffRanges, type AlignedRow } from './diff-align';
 import { useDiffSelection, useTrackerTick } from './selection';
@@ -48,6 +49,8 @@ export function FileDiffPanel({ theme, layout, workspaceId }: PluginWorkspacePan
   const rpc = useRpc(trackerFullFileRpc);
   const selection = useDiffSelection();
   const tick = useTrackerTick();
+  const syntaxSettings = useSettings(turnReviewSettings);
+  const syntaxTheme = syntaxSettings.status === 'ready' ? syntaxSettings.values.syntaxTheme : 'one';
 
   const [data, setData] = useState<TrackerFullFileDto | null>(null);
   const [busy, setBusy] = useState(false);
@@ -169,7 +172,7 @@ export function FileDiffPanel({ theme, layout, workspaceId }: PluginWorkspacePan
   }) => {
     const { tokens, line, lineNo, bg, strong, changed, numberColor, stripColor, colors } = opts;
     if (line == null) return <View style={s.cell} />;
-    const spans = buildLineSpans(tokens, line, changed, colors, bg, strong);
+    const spans = buildLineSpans(tokens, line, changed, colors, bg, strong, syntaxTheme);
     return (
       <View style={[s.cell, { backgroundColor: bg ?? undefined }]}>
         <View style={[s.strip, { backgroundColor: stripColor ?? 'transparent' }]} />

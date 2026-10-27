@@ -21,6 +21,16 @@ export type CaptureState =
   | 'interrupted'
   | 'failed';
 
+/**
+ * Why a capture could not produce a review (read-only marker).
+ * - `not-git-repository`: the workspace directory is not inside a Git work
+ *   tree, so there is no baseline to capture against. Turn Review requires
+ *   Git (fail-closed by design); the UI surfaces this instead of silently
+ *   showing nothing.
+ * - `missing-directory`: the workspace directory did not exist at capture time.
+ */
+export type CaptureError = 'not-git-repository' | 'missing-directory';
+
 export type ChangeKind = 'modified' | 'created' | 'deleted';
 
 /** Byte-level classification used to decide what may be touched. */
@@ -108,6 +118,13 @@ export interface Review {
   captureStable?: boolean;
   /** Paths downgraded to keep-only because they changed during the before scan. */
   unstablePaths?: string[];
+  /**
+   * Why the capture failed, when it did. `null`/absent when the capture was
+   * complete or failed for an unspecified reason. Currently used to surface a
+   * clear "requires Git" notice for non-Git workspaces (the turn is never
+   * undo-able either way — fail-closed).
+   */
+  captureError?: CaptureError | null;
   /**
    * `restore` = a synthetic re-opened row created by a successful rollback
    * recovery (rewind) so the file can be accepted/denied again. These rows are

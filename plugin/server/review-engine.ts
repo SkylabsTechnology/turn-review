@@ -408,6 +408,7 @@ export class ReviewEngine {
         endedAt: null,
         outcome: 'unknown',
         captureState: 'interrupted',
+        captureError: null,
         ambiguous: true,
         captureBarrier: 'event-best-effort',
         status: 'unsupported',
@@ -454,6 +455,7 @@ export class ReviewEngine {
       endedAt,
       outcome: input.outcome,
       captureState: 'not-captured',
+      captureError: null,
       ambiguous: true,
       captureBarrier: input.barrier,
       status: 'unsupported',
@@ -474,10 +476,14 @@ export class ReviewEngine {
     const occurrenceId = newId('cap');
     const startedAt = this.now();
     if (!root) {
-      // Non-git directory: record a read-only capture marker with no undo.
+      // Non-git directory (or a directory that does not exist yet): record a
+      // read-only capture marker with no undo. Mark WHY so the surface can
+      // tell the user a Git work tree is required instead of silently showing
+      // nothing (a new Paseo project/workspace is non-git until git init).
       const review = this.emptyReview(occurrenceId, input, startedAt, null);
       review.captureState = 'incomplete';
       review.status = 'unsupported';
+      review.captureError = this.isExistingDirectory(input.cwd) ? 'not-git-repository' : 'missing-directory';
       this.reviews.set(occurrenceId, review);
       this.persistReview(review);
       return occurrenceId;
@@ -534,6 +540,14 @@ export class ReviewEngine {
     return occurrenceId;
   }
 
+  private isExistingDirectory(cwd: string): boolean {
+    try {
+      return fs.statSync(cwd).isDirectory();
+    } catch {
+      return false;
+    }
+  }
+
   private emptyReview(occurrenceId: string, input: TurnStartInput, startedAt: string, root: string | null): Review {
     return {
       id: occurrenceId,
@@ -546,6 +560,7 @@ export class ReviewEngine {
       endedAt: null,
       outcome: 'unknown',
       captureState: 'not-captured',
+      captureError: null,
       ambiguous: false,
       captureBarrier: input.barrier,
       status: 'unsupported',
@@ -832,7 +847,28 @@ export class ReviewEngine {
     const actionable = review.files.filter((f) =>
       f.support !== 'excluded' && (f.kind === 'modified' || f.kind === 'created' || f.kind === 'deleted'),
     );
-    if (actionable.length === 0) return null;
+    if (actionable.length === 0) {
+      // No files to list. If the turn could not be captured because the
+      // workspace is not a Git repo, still append a card so the user sees WHY
+      // nothing was reviewed — previously a newly created non-Git workspace
+      // produced no card and no panel rows, which read as "turn review never
+      // triggers until restart."
+      if (review.captureError === 'not-git-repository') {
+        return {
+          reviewId,
+          workspaceId: review.workspaceId,
+          agentId: review.agentId,
+          endedAt: review.endedAt,
+          captureStable: true,
+          captureError: 'not-git-repository',
+          fileCount: 0,
+          added: 0,
+          deleted: 0,
+          files: [],
+        };
+      }
+      return null;
+    }
     const files = actionable.slice(0, TURN_REVIEW_MAX_CARD_FILES);
     const rows: TurnReviewCard['files'] = [];
     for (const f of files) {
@@ -851,6 +887,7 @@ export class ReviewEngine {
       agentId: review.agentId,
       endedAt: review.endedAt,
       captureStable: review.captureStable !== false,
+      captureError: null,
       fileCount: actionable.length,
       added: review.totalAdditions,
       deleted: review.totalDeletions,
@@ -1531,6 +1568,7 @@ export class ReviewEngine {
       endedAt: ts,
       outcome: 'completed',
       captureState: 'complete',
+      captureError: null,
       ambiguous: false,
       captureBarrier: 'event-best-effort',
       captureStable: true,
@@ -1991,6 +2029,7 @@ function reviewStub(id: string): Review {
     endedAt: null,
     outcome: 'unknown',
     captureState: 'not-captured',
+    captureError: null,
     ambiguous: false,
     captureBarrier: 'event-best-effort',
     status: 'unsupported',

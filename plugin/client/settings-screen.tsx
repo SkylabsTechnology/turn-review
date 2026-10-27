@@ -12,6 +12,7 @@ import {
   type SettingsInputHandle,
 } from '@getpaseo/plugin/client/ui';
 import { turnReviewSettings } from '../shared/settings';
+import { SYNTAX_THEME_OPTIONS } from './highlight-themes';
 import { listProjectsRpc, type ProjectRefDto } from '../shared/contracts';
 import type { SettingsState } from '@getpaseo/plugin/client';
 
@@ -148,6 +149,7 @@ export function TurnReviewSettingsScreen({ theme }: PluginSurfaceProps) {
   ];
 
   return (
+    <>
     <SettingsSection title="Turn Review safety gate" info="Undo writes to disk and is disabled by default.">
       <SettingsCard>
         <SettingsRow label="Write mode" hint="Fixture mode restricts rollback to the projects you choose below. Enabled (real-project) mode allows rollback on every repository — same safety gates, but on real work, so review each change before denying.">
@@ -244,5 +246,18 @@ export function TurnReviewSettingsScreen({ theme }: PluginSurfaceProps) {
         </Text>
       </SettingsCard>
     </SettingsSection>
+    <SettingsSection title="Diff syntax highlight theme" info="Syntax colors for the full-file diff and the Turn Review inline diffs, using Paseo's own highlight themes. A theme resolves to its light or dark variant from the app theme (like Paseo's editor); Dracula is the only fixed dark palette.">
+      <SettingsCard>
+        <SettingsRow label="Syntax highlight theme" hint="Pick the highlight theme used when rendering code in diffs. Applies to new diff renders immediately.">
+          <SettingsSelect
+            label="Syntax highlight theme"
+            value={current.values.syntaxTheme}
+            options={SYNTAX_THEME_OPTIONS}
+            onValueChange={(syntaxTheme) => void save(current, { ...current.values, syntaxTheme }, 'Syntax highlight theme saved.')}
+          />
+        </SettingsRow>
+      </SettingsCard>
+    </SettingsSection>
+    </>
   );
 }

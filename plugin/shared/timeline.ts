@@ -30,6 +30,12 @@ export const turnReviewCardSchema = z.object({
   endedAt: z.string(),
   /** False when the before-capture may have raced the agent's writes. */
   captureStable: z.boolean(),
+  /**
+   * Set when the turn could not be captured because the workspace is not a
+   * Git repository; the card renders a "requires Git" notice instead of a
+   * file list, so a newly created non-Git workspace is not silent.
+   */
+  captureError: z.enum(['not-git-repository', 'missing-directory']).nullable().optional(),
   fileCount: z.number().int().nonnegative(),
   added: z.number().int().nonnegative(),
   deleted: z.number().int().nonnegative(),

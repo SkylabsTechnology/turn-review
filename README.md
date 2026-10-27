@@ -32,6 +32,22 @@ Requires Paseo **>= 0.12.0**.
 - **Settings screen** — write-mode gate, rollback project picker, per-file
   size cap, retention, and per-project storage cap.
 
+## Screenshots
+
+![Turn Review — default view: the per-turn review card in the chat and the Turn Review panel, all file diffs collapsed](plugin-images/turn-review-main.png)
+
+*Default view — the per-turn review card in the chat and the Turn Review
+panel, with all file diffs collapsed.*
+
+![Turn Review — the same view with the file diffs expanded](plugin-images/turn-review-main_2.png)
+
+*The same view with the file diffs expanded in the panel.*
+
+![Full File Diff — side-by-side diff of the files an agent changed](plugin-images/full-file-diff-view.png)
+
+*The Full File Diff tab — the whole-file side-by-side diff of the files an
+agent changed.*
+
 ## How it works
 
 **Keep / Accept** is metadata only: it records your decision and clears the
@@ -163,7 +179,7 @@ rollbacks, and the working tree are never touched.
 cd plugin
 npm install
 npm run typecheck
-npm test          # 129 unit/integration tests (diff viewer + alignment, deny/restore/rewind, tracker, gates, GC)
+npm test          # 140 unit/integration tests (diff viewer + alignment, deny/restore/rewind, tracker, gates, GC)
 ```
 
 ## Contributing
@@ -187,6 +203,13 @@ provided **as is**, without warranty of any kind.
 
 ## Limitations
 
+- **Git is required.** Turn Review captures against a Git work tree and will
+  not capture a workspace that isn't a Git repository (fail closed by design —
+  no review, no Undo). A brand-new Paseo project/workspace is `non_git` until
+  you initialize Git, so the panel and the per-turn chat card show a clear
+  **"this workspace isn't a Git repository"** notice instead of silently
+  appearing to do nothing. Run `git init` (or open an existing Git repository)
+  to enable review.
 - Paseo 0.12 does not expose an API to force the panel into the right split
   programmatically; you place it there with the native tab controls.
 - A capture whose start event is missed (daemon restart mid-turn) yields an
