@@ -57,6 +57,15 @@ export const turnReviewSettings = defineSettings({
     fixtureRoots: z.array(z.string().min(1)).default([]),
     /** When true, fixture write mode applies to every project (no allowlist). */
     allowAllProjects: z.boolean().default(false),
+    /**
+     * When true, Deny/Undo is allowed on captures flagged for overlapping
+     * agents (C13 relaxation, user-authorized). Default off (strict): any
+     * repo with concurrent agents keeps rollback disabled there. When on, the
+     * multi-agent gate is skipped but every other gate still applies — most
+     * importantly live-match/CAS, so a file you edited after the turn is never
+     * rolled back (it becomes the dismiss/implicit-accept workflow).
+     */
+    allowMultiAgentDeny: z.boolean().default(false),
     /** Per-file raw-byte capture cap. Files over this are keep-only (or excluded). */
     maxFileBytes: z.number().int().min(1024).max(50 * 1024 * 1024).default(1024 * 1024),
     /** Retention for journal + backups, in days. */

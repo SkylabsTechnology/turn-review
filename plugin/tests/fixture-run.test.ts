@@ -71,6 +71,7 @@ test('F-R3: fixture-run refuses when no idle agent exists for the workspace', as
       getSettings: async () => fixtureSettings([root]),
       isAgentRunning: async () => false,
       findIdleAgent: async () => null,
+      allowFixtureRun: true,
     });
     engine2.load();
     try {
@@ -190,6 +191,7 @@ test('F-R9: a Deny on a fixture row is refused while the agent is running (write
     getSettings: async () => fixtureSettings([root]),
     isAgentRunning: async () => true, // agent busy -> writer-active must refuse
     findIdleAgent: async () => 'a1',
+    allowFixtureRun: true,
   });
   engine.load();
   try {

@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import { digest } from './util';
+import { digest, newId, openExclusiveNoFollow } from './util';
 
 /**
  * Durable private storage for the plugin: a content-addressed blob store and a
@@ -166,6 +166,8 @@ export interface JournalRecord {
 /** Append-only JSONL journal with idempotent write-through and compaction. */
 export class Journal {
   private readonly file: string;
+  /** Fail-closed corruption marker set by the last readState(). */
+  private corrupt = false;
 
   constructor(root: string) {
     this.file = path.join(root, 'journal.jsonl');
@@ -177,42 +179,67 @@ export class Journal {
   }
 
   readAll(): JournalRecord[] {
+    return this.readState().records;
+  }
+
+  /**
+   * Parse the journal, recording whether any line failed to parse. A damaged
+   * line is skipped for record purposes but flagged so compaction and write
+   * gates fail closed instead of silently dropping data (F7).
+   */
+  readState(): { records: JournalRecord[]; corrupt: boolean; corruptLines: number } {
     try {
       const raw = fs.readFileSync(this.file, 'utf8');
       const records: JournalRecord[] = [];
+      let corrupt = false;
+      let corruptLines = 0;
       for (const line of raw.split('\n')) {
         if (!line.trim()) continue;
         try {
           records.push(JSON.parse(line) as JournalRecord);
         } catch {
-          // Corrupted line: fail closed on load (C24) — surface as empty and
-          // let the engine refuse Undo when the journal is damaged.
-          continue;
+          corrupt = true;
+          corruptLines += 1;
         }
       }
-      return records;
+      this.corrupt = corrupt;
+      return { records, corrupt, corruptLines };
     } catch {
-      return [];
+      // Unreadable/missing journal: treat as empty, not corrupt.
+      this.corrupt = false;
+      return { records: [], corrupt: false, corruptLines: 0 };
     }
   }
 
   /**
+   * True when the most recent read found a corrupted line. Compaction and the
+   * engine's write gates refuse while true so a corrupt line is never silently
+   * compacted away (data loss) or used to authorize a write.
+   */
+  hasCorruption(): boolean {
+    return this.corrupt;
+  }
+
+  /**
    * Replace the whole journal with the given records (retention compaction).
-   * Atomic: write to a temp file, fsync, then rename over the journal so a
-   * crash mid-rewrite leaves the original journal intact rather than a
-   * truncated one. Never called concurrently with appends in this build.
+   * Atomic: write to an unpredictably named, exclusively created temp file,
+   * fsync, then rename over the journal so a crash mid-rewrite leaves the
+   * original journal intact. Refuses (without mutating anything) when the
+   * journal currently contains corrupted lines, so compaction never drops data.
    */
   rewrite(records: JournalRecord[]): void {
+    if (this.corrupt) {
+      throw new Error('journal-corrupt');
+    }
     const content = records.map((r) => JSON.stringify(r)).join('\n') + (records.length ? '\n' : '');
-    const tmp = `${this.file}.tmp-${process.pid}-${Date.now()}`;
+    const tmp = `${this.file}.tmp-${newId('cmp')}`;
     let fd: number;
     try {
-      fd = fs.openSync(tmp, 'w', 0o600);
+      fd = openExclusiveNoFollow(tmp);
     } catch {
-      // Cannot create a temp file (e.g. read-only dir): fall back to the
-      // in-place path rather than failing the caller.
-      writePrivate(this.file, content);
-      return;
+      // No unsafe in-place fallback: truncating the journal directly risks a
+      // crash leaving a truncated journal. Fail and leave the journal intact.
+      throw new Error('journal-rewrite-temp-failed');
     }
     try {
       fs.writeFileSync(fd, content);
@@ -238,6 +265,13 @@ export interface OpRecord {
   ts: string;
   /** Write kind: 'deny' | 'undo' | 'restore'. Used to scope rollback recovery. */
   kind?: string;
+  /**
+   * Permission bits to re-apply when the write recreates a file (absent
+   * target), e.g. rollback of a deleted file or recovery of a created file.
+   * Null/absent when the write replaced an existing file (its live mode is
+   * preserved directly).
+   */
+  mode?: number | null;
 }
 
 /** Per-operation transaction records, keyed by operationId for idempotency. */

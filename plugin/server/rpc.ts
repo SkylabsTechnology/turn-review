@@ -53,11 +53,12 @@ function capturePaseo(context: PluginHandlerContext): void {
   paseoHolder.current = context.paseo;
 }
 
-function mapSettings(values: { undoMode: 'disabled' | 'fixture' | 'enabled'; fixtureRoots: string[]; allowAllProjects?: boolean; maxFileBytes: number; retentionDays: number; maxProjectBytes?: number; denyPaths: string[] }): SettingsSnapshot {
+function mapSettings(values: { undoMode: 'disabled' | 'fixture' | 'enabled'; fixtureRoots: string[]; allowAllProjects?: boolean; allowMultiAgentDeny?: boolean; maxFileBytes: number; retentionDays: number; maxProjectBytes?: number; denyPaths: string[] }): SettingsSnapshot {
   return {
     undoMode: values.undoMode,
     fixtureRoots: values.fixtureRoots,
     allowAllProjects: values.allowAllProjects === true,
+    allowMultiAgentDeny: values.allowMultiAgentDeny === true,
     maxFileBytes: values.maxFileBytes,
     retentionDays: values.retentionDays,
     maxProjectBytes: values.maxProjectBytes,
@@ -80,7 +81,7 @@ export function wireRpc(server: PluginServerContext, options: RpcWireOptions): R
     } catch {
       // fall through to defaults
     }
-    return { undoMode: 'disabled', fixtureRoots: [], allowAllProjects: false, maxFileBytes: 1024 * 1024, retentionDays: 30, maxProjectBytes: 1024 * 1024 * 1024, denyPaths: [] };
+    return { undoMode: 'disabled', fixtureRoots: [], allowAllProjects: false, allowMultiAgentDeny: false, maxFileBytes: 1024 * 1024, retentionDays: 30, maxProjectBytes: 1024 * 1024 * 1024, denyPaths: [] };
   };
 
   const engine = new ReviewEngine({
@@ -114,6 +115,9 @@ export function wireRpc(server: PluginServerContext, options: RpcWireOptions): R
     },
     onReviewChanged: options.onReviewChanged,
     onDenyApplied: options.onDenyApplied,
+    // F1: the simulated writer is off by default in a live install; a
+    // developer may explicitly opt in for manual demo/testing only.
+    allowFixtureRun: process.env.TURN_REVIEW_ALLOW_FIXTURE === '1',
   });
   engine.load();
   // Retention/cap GC at startup and periodically (synchronous critical section

@@ -4,5 +4,5 @@
   "description": "Review agent turns and keep or undo file changes with a cross-turn tracker and per-file diffs. Write modes: disabled (default), fixture (allowlist-scoped), or enabled (real projects). All write modes run the same safety gates: complete before/after capture, CAS/live-match, ambiguity, repo identity, writer-active. After a Deny the change can be restored and re-opened for accept/deny until the next turn. Resolved reviews, backups and ops are pruned by retention/per-project cap GC.",
   "icon": "assets/logo_dark.png",
   "media": ["assets/turn-review-main.png", "assets/turn-review-main_2.png", "assets/full-file-diff-view.png"],
-  "requirements": {"paseo": ">=0.12.0"}
+  "requirements": {"paseo": ">=0.13.2"}
 }

@@ -82,14 +82,22 @@ export function safeRelativePath(rootReal: string, cwd: string, candidate: strin
   if (folded !== root && !folded.startsWith(root + path.sep) && !folded.startsWith(root + '/')) {
     return { ok: false, relativePath: null, reason: 'outside-root' };
   }
-  // Suffix segments must not traverse or hit a git boundary.
-  if (suffix.some((s) => s === '..' || s === '.' || s === '.git')) {
-    return { ok: false, relativePath: null, reason: suffix.includes('.git') ? 'git-boundary' : 'traversal' };
+  // Suffix segments must not traverse or hit a git boundary. `.git` is
+  // handled on the final relative path below (it may also be an existing
+  // prefix, e.g. `<root>/.git/config`).
+  if (suffix.some((s) => s === '..' || s === '.')) {
+    return { ok: false, relativePath: null, reason: 'traversal' };
   }
   const finalReal = path.join(realPrefix, ...suffix);
   const rel = toPosix(path.relative(rootReal, finalReal));
   if (rel === '' || rel.split('/').some((s) => s === '..')) {
     return { ok: false, relativePath: null, reason: 'outside-root' };
+  }
+  // Git metadata (`.git` at any depth — an existing `.git` directory, the
+  // worktree gitdir pointer file, or a nested `.git` file) must never be a
+  // read/write target, even though it resolves inside the root (F2 security).
+  if (rel.split('/').includes('.git')) {
+    return { ok: false, relativePath: null, reason: 'git-boundary' };
   }
   // Walk existing ancestors from the root and refuse if any is a symlink or
   // junction redirecting outside the root.

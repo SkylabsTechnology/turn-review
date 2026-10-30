@@ -6,8 +6,20 @@ import {
   runGit,
 } from './git-adapter';
 import { isSensitivePath, isNestedGitBoundary, realPath } from './path-safety';
-import { digest, looksBinary, toPosix, nowIso } from './util';
+import { digest, looksBinary, toPosix, nowIso, openReadNoFollow } from './util';
 import type { FileKind, FileSupport } from '../shared/types';
+
+/** True when `file` (absolute) resolves to a path strictly inside `rootReal`. */
+function isWithinRoot(rootReal: string, file: string): boolean {
+  try {
+    const real = realPath(file);
+    const foldedReal = real.toLowerCase();
+    const foldedRoot = rootReal.toLowerCase();
+    return foldedReal === foldedRoot || foldedReal.startsWith(foldedRoot + path.sep);
+  } catch {
+    return false;
+  }
+}
 
 export interface CapturePolicy {
   maxFileBytes: number;
@@ -27,6 +39,8 @@ export interface SnapshotFile {
   existsOnDisk: boolean;
   /** mtimeMs observed at capture; used to detect writes during the scan. */
   mtimeMs?: number;
+  /** Permission bits (stat.mode) observed at capture; preserved on restore. */
+  mode?: number | null;
 }
 
 export interface Snapshot {
@@ -45,27 +59,41 @@ export interface CaptureResult {
   snapshot: Snapshot | null;
 }
 
-/** Read at most `limit` bytes of a file without following symlinks. */
-function readBounded(file: string, limit: number): { bytes: Buffer; tooLarge: boolean } | null {
+/**
+ * Read at most `limit` bytes of a file without following symlinks. Opens with
+ * O_NOFOLLOW where available (a symlink at the path fails the open), verifies
+ * the opened handle is a regular file, and on platforms without O_NOFOLLOW
+ * (Windows) confirms the resolved path stays inside the authorized root —
+ * closing the snapshot symlink race between classification and read (F4).
+ */
+function readBounded(rootReal: string, file: string, limit: number): { bytes: Buffer; tooLarge: boolean } | null {
+  let fd: number;
   try {
-    const fd = fs.openSync(file, 'r');
-    try {
-      const size = fs.fstatSync(fd).size;
-      const length = Math.min(size, limit + 1);
-      const buf = Buffer.alloc(length);
-      let offset = 0;
-      while (offset < length) {
-        const n = fs.readSync(fd, buf, offset, length - offset, offset);
-        if (n <= 0) break;
-        offset += n;
-      }
-      const bytes = buf.subarray(0, offset);
-      return { bytes, tooLarge: size > limit };
-    } finally {
-      fs.closeSync(fd);
-    }
+    fd = openReadNoFollow(file);
   } catch {
     return null;
+  }
+  try {
+    const st = fs.fstatSync(fd);
+    if (!st.isFile()) return null; // symlink/dir/socket: never read
+    // Containment check on every platform: O_NOFOLLOW (POSIX) only protects the
+    // FINAL component, so an intermediate directory swapped for a symlink could
+    // otherwise resolve outside the authorized root. realpath reflects the
+    // current resolution and catches a planted symlink/junction redirect (F4).
+    if (!isWithinRoot(rootReal, file)) return null;
+    const size = st.size;
+    const length = Math.min(size, limit + 1);
+    const buf = Buffer.alloc(length);
+    let offset = 0;
+    while (offset < length) {
+      const n = fs.readSync(fd, buf, offset, length - offset, offset);
+      if (n <= 0) break;
+      offset += n;
+    }
+    const bytes = buf.subarray(0, offset);
+    return { bytes, tooLarge: size > limit };
+  } finally {
+    fs.closeSync(fd);
   }
 }
 
@@ -109,7 +137,7 @@ export async function verifyBaselineStability(root: string, blobs: BlobStore, sn
       continue;
     }
     if (stat.size === file.size && stat.mtimeMs === file.mtimeMs) continue; // stable
-    const read = readBounded(abs, maxFileBytes);
+    const read = readBounded(root, abs, maxFileBytes);
     const stable = read !== null && !read.tooLarge && digest(read.bytes) === file.hash;
     if (!stable) {
       file.support = 'keep-only';
@@ -172,7 +200,7 @@ export async function captureWorktree(root: string, blobs: BlobStore, policy: Ca
     if (isSensitivePath(relativePath, policy.denyPaths)) {
       files.set(relativePath, {
         relativePath, hash: null, size: null, kind: 'other', support: 'excluded',
-        tracked: false, ignored: true, preTurnDirty: false, existsOnDisk: false,
+        tracked: false, ignored: true, preTurnDirty: false, existsOnDisk: false, mode: null,
       });
       continue;
     }
@@ -190,7 +218,7 @@ export async function captureWorktree(root: string, blobs: BlobStore, policy: Ca
       // Submodule / gitlink (mode 160000) or a directory entry: read-only.
       files.set(relativePath, {
         relativePath, hash: null, size: null, kind: 'submodule', support: 'unsupported',
-        tracked: true, ignored: false, preTurnDirty: false, existsOnDisk: true,
+        tracked: true, ignored: false, preTurnDirty: false, existsOnDisk: true, mode: stat?.mode ?? null,
       });
       continue;
     }
@@ -202,7 +230,7 @@ export async function captureWorktree(root: string, blobs: BlobStore, policy: Ca
     if (isNestedGitBoundary(canonicalRoot, relativePath)) {
       files.set(relativePath, {
         relativePath, hash: null, size: null, kind: 'submodule', support: 'unsupported',
-        tracked, ignored: false, preTurnDirty, existsOnDisk,
+        tracked, ignored: false, preTurnDirty, existsOnDisk, mode: stat?.mode ?? null,
       });
       continue;
     }
@@ -210,7 +238,7 @@ export async function captureWorktree(root: string, blobs: BlobStore, policy: Ca
     if (!existsOnDisk) {
       files.set(relativePath, {
         relativePath, hash: null, size: null, kind: 'other', support: 'unsupported',
-        tracked, ignored: false, preTurnDirty, existsOnDisk: false,
+        tracked, ignored: false, preTurnDirty, existsOnDisk: false, mode: null,
       });
       continue;
     }
@@ -218,7 +246,7 @@ export async function captureWorktree(root: string, blobs: BlobStore, policy: Ca
     if (isSymlink) {
       files.set(relativePath, {
         relativePath, hash: null, size: null, kind: 'symlink', support: 'unsupported',
-        tracked, ignored: false, preTurnDirty, existsOnDisk: true,
+        tracked, ignored: false, preTurnDirty, existsOnDisk: true, mode: stat!.mode,
       });
       continue;
     }
@@ -228,16 +256,16 @@ export async function captureWorktree(root: string, blobs: BlobStore, policy: Ca
     if (overCapUntracked) {
       files.set(relativePath, {
         relativePath, hash: null, size: stat!.size, kind: looksBinary(Buffer.alloc(0)) ? 'binary' : 'text',
-        support: 'excluded', tracked, ignored: false, preTurnDirty, existsOnDisk: true,
+        support: 'excluded', tracked, ignored: false, preTurnDirty, existsOnDisk: true, mode: stat!.mode,
       });
       continue;
     }
 
-    const read = readBounded(abs, policy.maxFileBytes);
+    const read = readBounded(canonicalRoot, abs, policy.maxFileBytes);
     if (read === null) {
       files.set(relativePath, {
         relativePath, hash: null, size: null, kind: 'other', support: 'unsupported',
-        tracked, ignored: false, preTurnDirty, existsOnDisk: true,
+        tracked, ignored: false, preTurnDirty, existsOnDisk: true, mode: stat!.mode,
       });
       continue;
     }
@@ -248,7 +276,7 @@ export async function captureWorktree(root: string, blobs: BlobStore, policy: Ca
     }
     files.set(relativePath, {
       relativePath, hash, size: read.tooLarge ? read.bytes.length : stat!.size, kind, support,
-      tracked, ignored: false, preTurnDirty, existsOnDisk: true, mtimeMs: stat!.mtimeMs,
+      tracked, ignored: false, preTurnDirty, existsOnDisk: true, mtimeMs: stat!.mtimeMs, mode: stat!.mode,
     });
   }
 

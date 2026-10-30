@@ -1,5 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import path from 'node:path';
 import { makeRepo, makeHarness, writeFile, readFile, git, fixtureSettings, sha } from './helpers';
 import { trackerOpId } from '../shared/op-id';
 import type { ReviewEngine } from '../server/review-engine';
@@ -317,6 +319,50 @@ test('R6: recovery re-checks the write gate — disabling fixture mode (or remov
     const ok = await harness.engine.trackerRecover(WS, 'a.txt', rec[0].operationId);
     assert.equal(ok.result.status, 'ok');
     assert.deepEqual(readFile(root, 'a.txt'), Buffer.from('A1\n'));
+  } finally {
+    cleanup();
+    harness.cleanup();
+  }
+});
+
+test('F6: Deny of a DELETED file is recoverable; Restore re-applies the deletion and Deny again recreates it', async () => {
+  const { root, cleanup } = makeRepo();
+  writeFile(root, 'a.txt', 'A0\n');
+  git(root, ['add', 'a.txt']);
+  git(root, ['commit', '-m', 'add a']);
+  const harness = makeHarness(root);
+  try {
+    // Turn deletes a.txt.
+    await runTurn(harness.engine, root, () => fs.unlinkSync(path.join(root, 'a.txt')));
+    const files = await harness.engine.trackerList(WS);
+    assert.equal(files[0].kind, 'deleted');
+    assert.equal(files[0].deniable, true);
+
+    // Deny recreates the baseline file.
+    const deny = await harness.engine.trackerDeny(WS, 'a.txt', trackerOpId(WS, 'deny', 'a.txt', files[0].currentHash));
+    assert.equal(deny.result.status, 'ok');
+    assert.deepEqual(readFile(root, 'a.txt'), Buffer.from('A0\n'));
+
+    // F6 regression: a deleted-file Deny is now recoverable (previously the
+    // zero-byte backup made it look like a duplicate/keep-only change).
+    const rec = await harness.engine.trackerRecoverable(WS);
+    assert.equal(rec.length, 1);
+    assert.equal(rec[0].path, 'a.txt');
+
+    // Restore re-applies the deletion (file gone again).
+    const restore = await harness.engine.trackerRecover(WS, 'a.txt', rec[0].operationId);
+    assert.equal(restore.result.status, 'ok');
+    assert.equal(fs.existsSync(path.join(root, 'a.txt')), false, 'Restore must re-apply the deletion');
+    assert.equal((await harness.engine.trackerRecoverable(WS)).length, 0);
+
+    // REWIND row is present and deniable; Deny again recreates the baseline.
+    const after = await harness.engine.trackerList(WS);
+    assert.equal(after.length, 1);
+    assert.equal(after[0].kind, 'deleted');
+    assert.equal(after[0].deniable, true, 'restored deletion is deniable again');
+    const deny2 = await harness.engine.trackerDeny(WS, 'a.txt', trackerOpId(WS, 'deny', 'a.txt', after[0].currentHash));
+    assert.equal(deny2.result.status, 'ok');
+    assert.deepEqual(readFile(root, 'a.txt'), Buffer.from('A0\n'), 'rewind Deny recreates the baseline');
   } finally {
     cleanup();
     harness.cleanup();

@@ -5,7 +5,7 @@ decide, per file or for the whole turn, whether to **keep** it or **undo**
 (roll back) it — with a cross-turn tracker, durable before/after snapshots, and
 strict safety gates. Everything runs locally; no data leaves your machine.
 
-Requires Paseo **>= 0.12.0**.
+Requires Paseo **>= 0.13.2**.
 
 ## Features
 

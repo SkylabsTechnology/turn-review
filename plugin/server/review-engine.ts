@@ -15,7 +15,7 @@ import {
   isSensitivePath,
   isWindows,
 } from './path-safety';
-import { digest, newId, nowIso, redact } from './util';
+import { digest, newId, nowIso, redact, openExclusiveNoFollow } from './util';
 
 /** Side-by-side viewer renders at most this many lines per side. */
 const FULL_FILE_MAX_LINES = 2000;
@@ -37,6 +37,11 @@ export interface SettingsSnapshot {
   fixtureRoots: string[];
   /** When true, fixture write mode applies to every project (no allowlist). */
   allowAllProjects?: boolean;
+  /**
+   * When true, Deny/Undo is allowed on captures flagged for overlapping agents
+   * (C13 relaxation). Default false: the multi-agent gate stays strict.
+   */
+  allowMultiAgentDeny?: boolean;
   maxFileBytes: number;
   retentionDays: number;
   /** Per-project storage cap in bytes (0 = unlimited). */
@@ -74,6 +79,14 @@ export interface EngineDeps {
    * writer-active gate on Deny. Returns null when no idle agent exists.
    */
   findIdleAgent?: (workspaceId: string | null) => Promise<string | null>;
+  /**
+   * Test-only authorization for the simulated file writer (F1). When false
+   * (the default) `fixtureRun` refuses before touching the filesystem, so a
+   * stock live install exposes no unrestricted production write path. The test
+   * harness sets this true; a live daemon only opts in via an explicit env var
+   * (`TURN_REVIEW_ALLOW_FIXTURE=1`) wired in index.server/rpc wiring.
+   */
+  allowFixtureRun?: boolean;
   onReviewChanged?: (review: Review) => void;
   /** Optional: fired once a Deny rollback succeeds (used for a chat notice). */
   onDenyApplied?: (info: { agentId: string; workspaceId: string; path: string; operationId: string }) => void;
@@ -114,6 +127,20 @@ const MAX_CAPTURE_FILES = 100_000;
 const LOCK_STALE_MS = 10 * 60 * 1000;
 const LOCK_TIMEOUT_MS = 20_000;
 const LOCK_RETRY_MS = 150;
+/** Heartbeat interval while holding a repo lock: keeps mtime fresh so a long,
+ * legitimate write is never mistaken for a stale lock (F8). */
+const LOCK_HEARTBEAT_MS = 30_000;
+
+/** True when the given PID currently exists on this host. */
+function processAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    // EPERM = exists but owned by another user (still alive on Windows/posix).
+    return (err as NodeJS.ErrnoException).code === 'EPERM';
+  }
+}
 
 /**
  * Operation ids are client-supplied and must not be able to steer the op-file
@@ -231,7 +258,7 @@ export class ReviewEngine {
       // the window closes, recovery is refused (window-closed) and the review
       // is prunable like any other resolved review.
       const hasLiveRecovery = ops.some(
-        (o) => o.reviewId === r.id && o.kind === 'deny' && o.state === 'applied' && o.backupSha !== 'absent' && !this.recoveryWindowClosed(r, o.ts),
+        (o) => o.reviewId === r.id && o.kind === 'deny' && o.state === 'applied' && (o.backupSha !== 'absent' || o.candidateSha !== 'absent') && !this.recoveryWindowClosed(r, o.ts),
       );
       if (hasLiveRecovery) continue;
       if (r.files.some((f) => pendingKeys.has(this.pathKey(r, f.relativePath)))) continue; // history guard
@@ -490,6 +517,18 @@ export class ReviewEngine {
     }
 
     // Overlap detection: another capture already active in the same root (C13).
+    // A capture from the SAME agent still active here is an orphaned start
+    // whose `turn_ended` never arrived (an agent cannot run two turns at once;
+    // a duplicate start event likewise leaves the first unrecoverable). Close
+    // it as interrupted/unsupported instead of flagging the new capture as
+    // ambiguous — a stale active capture would otherwise poison every later
+    // capture in the repo until the plugin is reloaded (lost-end-event
+    // lifecycle gap).
+    for (const active of [...this.active.values()]) {
+      if (active.root === root && active.agentId === input.agentId) {
+        this.closeOrphanedCapture(active);
+      }
+    }
     const overlaps = [...this.active.values()].filter((a) => a.root === root);
     const ambiguous = overlaps.length > 0;
     for (const other of overlaps) {
@@ -573,6 +612,22 @@ export class ReviewEngine {
     };
   }
 
+  /**
+   * A capture whose end event never arrived must never offer Undo, and must
+   * not keep poisoning later captures in the same repo. Removes it from the
+   * active set and marks its review interrupted/unsupported (C25) — the same
+   * fail-closed treatment `load()` gives torn captures after a reload.
+   */
+  private closeOrphanedCapture(active: ActiveCapture): void {
+    this.active.delete(active.occurrenceId);
+    const review = this.reviews.get(active.occurrenceId);
+    if (review) {
+      review.captureState = 'interrupted';
+      review.status = 'unsupported';
+      this.persistReview(review);
+    }
+  }
+
   async endTurn(input: TurnEndInput): Promise<Review | null> {
     const active = this.active.get(input.occurrenceId);
     this.active.delete(input.occurrenceId);
@@ -580,9 +635,11 @@ export class ReviewEngine {
     if (!existing) return null;
 
     // Mark any capture still active on the same root as ambiguous (concurrent
-    // agent finished later) — C13.
+    // agent finished later) — C13. Same-agent captures are never marked here:
+    // startTurn closes a same-agent orphan (lost `turn_ended`), so any
+    // same-agent entry still in `active` is not concurrency.
     for (const other of this.active.values()) {
-      if (other.root === existing.rootRealPath) {
+      if (other.root === existing.rootRealPath && other.agentId !== input.agentId) {
         const otherReview = this.reviews.get(other.occurrenceId);
         if (otherReview && !otherReview.ambiguous) {
           otherReview.ambiguous = true;
@@ -693,6 +750,11 @@ export class ReviewEngine {
       status,
       keptHunks: [],
       conflictReason,
+      // F5: permission bits to re-apply when this file is recreated on
+      // rollback/recovery. Created files use the after (agent) mode; otherwise
+      // the baseline mode is preserved so a deleted file's exec bit survives a
+      // Deny that recreates it.
+      mode: kind === 'created' ? (af?.mode ?? null) : (bf?.mode ?? null),
     };
   }
 
@@ -764,6 +826,7 @@ export class ReviewEngine {
       writeEnabled,
       fixtureRoots: settings.fixtureRoots,
       allowAllProjects: settings.allowAllProjects === true,
+      allowMultiAgentDeny: settings.allowMultiAgentDeny === true,
       maxFileBytes: settings.maxFileBytes,
       retentionDays: settings.retentionDays,
       maxProjectBytes: settings.maxProjectBytes ?? 1024 * 1024 * 1024,
@@ -996,6 +1059,12 @@ export class ReviewEngine {
     const review = this.reviews.get(reviewId);
     if (!review) return { result: refusal('missing-review', 'Review record not found'), review: reviewStub(reviewId) };
     if (review.workspaceId !== null && review.workspaceId !== workspaceId) return { result: refusal('workspace-mismatch', 'Workspace mismatch.'), review };
+    // F7: restoreBackup is a write authorized from the journal; refuse when the
+    // journal is damaged so no write path can operate on possibly-corrupted
+    // records (same fail-closed gate as undoGate / trackerRecover / fixtureRun).
+    if (this.storage.journal.hasCorruption()) {
+      return { result: refusal('journal-corrupt', 'The journal is damaged; backup restore refused.'), review };
+    }
     const op = this.storage.ops.read(operationId);
     if (!op) return { result: refusal('missing-operation', 'No such operation.'), review };
     if (op.reviewId !== reviewId) return { result: refusal('operation-mismatch', 'Operation belongs to a different review.'), review };
@@ -1140,7 +1209,7 @@ export class ReviewEngine {
       if (!liveMatch) {
         deniable = false;
         reason = 'live-changed';
-      } else if (baseline.review.ambiguous) {
+      } else if (baseline.review.ambiguous && settings.allowMultiAgentDeny !== true) {
         deniable = false;
         reason = 'multi-agent';
       } else if (!baselineRestorable) {
@@ -1299,10 +1368,12 @@ export class ReviewEngine {
     if (baseline.file.support !== 'undo-exact') return { result: refusal('unsupported-undo', 'No exact byte baseline for Undo.'), resolved: false };
     // Attribution is trusted when the baseline capture was verified stable
     // (`support === 'undo-exact'`) and the review was not flagged for
-    // overlapping agents (undoGate refuses those with `unsafe-capture`). A
-    // dirty/untracked file no longer refuses whole-file Deny: it restores the
-    // recorded before-state byte-for-byte, preserving any pre-turn work
-    // (DECISIONS §20 — user-authorized relaxation).
+    // overlapping agents (undoGate refuses those with `unsafe-capture` unless
+    // the user enabled the multi-agent relaxation — then the byte-exact
+    // restore runs with CAS intact). A dirty/untracked file no longer refuses
+    // whole-file Deny: it restores the recorded before-state byte-for-byte,
+    // preserving any pre-turn work (DECISIONS §20 — user-authorized
+    // relaxation).
 
     const baselinePresent = baseline.file.kind !== 'created';
     const currentPresent = current.file.kind !== 'deleted';
@@ -1349,6 +1420,7 @@ export class ReviewEngine {
       status: 'pending',
       keptHunks: [],
       conflictReason: null,
+      mode: baseline.file.mode ?? null,
     };
     const outcome = await this.executeWrite(review, synthetic, operationId, candidate, live, targetAbsent, 'deny');
     if (outcome.result.status === 'ok') {
@@ -1404,7 +1476,11 @@ export class ReviewEngine {
   async trackerRecoverable(workspaceId: string): Promise<Array<{ path: string; reviewId: string; operationId: string; deniedAt: string }>> {
     const out: Array<{ path: string; reviewId: string; operationId: string; deniedAt: string }> = [];
     for (const op of this.storage.ops.list()) {
-      if (op.kind !== 'deny' || op.state !== 'applied' || op.backupSha === 'absent') continue;
+      // F6: a deny of a DELETED file (rollback recreated the file) stores
+      // backupSha 'absent' with candidateSha = the recreated baseline; it IS
+      // recoverable (re-apply the deletion). Skip only when neither a backup
+      // nor a candidate exists — nothing was actually changed by the op.
+      if (op.kind !== 'deny' || op.state !== 'applied' || (op.backupSha === 'absent' && op.candidateSha === 'absent')) continue;
       const review = this.reviews.get(op.reviewId);
       if (!review || review.workspaceId !== workspaceId) continue;
       if (this.recoveryWindowClosed(review, op.ts)) continue;
@@ -1436,8 +1512,15 @@ export class ReviewEngine {
     }
     const op = this.storage.ops.read(operationId);
     if (!op) return { result: refusal('missing-operation', 'No such operation.'), resolved: false };
-    if (op.kind !== 'deny' || op.state !== 'applied' || op.backupSha === 'absent') {
+    // F6: a deny of a DELETED file is recoverable too (backupSha 'absent',
+    // candidateSha = the recreated baseline) — Restore re-applies the
+    // deletion. Only skip when neither a backup nor a candidate exists.
+    if (op.kind !== 'deny' || op.state !== 'applied' || (op.backupSha === 'absent' && op.candidateSha === 'absent')) {
       return { result: refusal('not-recoverable', 'This change is not recoverable.'), resolved: false };
+    }
+    // F7: never authorize a write from a damaged journal.
+    if (this.storage.journal.hasCorruption()) {
+      return { result: refusal('journal-corrupt', 'The journal is damaged; restore refused.'), resolved: false };
     }
     const review = this.reviews.get(op.reviewId);
     if (!review) return { result: refusal('missing-review', 'Review record not found.'), resolved: false };
@@ -1465,15 +1548,22 @@ export class ReviewEngine {
     if ((live === null ? 'absent' : digest(live)) !== op.candidateSha) {
       return { result: conflictResult('file-changed', 'The file changed since the rollback; recovery refused.'), resolved: false };
     }
-    const backup = this.storage.blobs.get(op.backupSha);
-    if (!backup) return { result: refusal('missing-blob', 'Recovery data missing.'), resolved: false };
 
     // Recreate the denied after-state over the current (rolled-back) baseline.
     const targetAbsent = op.backupSha === 'absent';
     const targetCreated = op.candidateSha === 'absent';
+    let backup: Buffer | null = null;
+    if (!targetAbsent) {
+      backup = this.storage.blobs.get(op.backupSha);
+      if (!backup) return { result: refusal('missing-blob', 'Recovery data missing.'), resolved: false };
+    }
     const synthetic: FileChange = {
       relativePath: rel,
-      kind: targetAbsent ? 'deleted' : targetCreated ? 'created' : 'modified',
+      // For a deleted-file restore (re-apply the deletion) the target file
+      // EXISTS (the rollback recreated it), so the write must go through the
+      // 'modified' CAS branch that allows an existing, hash-matching target
+      // before unlinking — 'deleted' would (correctly) refuse an existing file.
+      kind: targetAbsent ? 'modified' : targetCreated ? 'created' : 'modified',
       beforeHash: op.candidateSha === 'absent' ? null : op.candidateSha,
       // afterHash is the CAS target: the current state must still equal the
       // rolled-back baseline before we restore the denied bytes.
@@ -1489,8 +1579,9 @@ export class ReviewEngine {
       status: 'pending',
       keptHunks: [],
       conflictReason: null,
+      mode: op.mode ?? null,
     };
-    const outcome = await this.executeWrite(review, synthetic, `${operationId}:recover`, targetAbsent ? Buffer.alloc(0) : backup, live, targetAbsent, 'restore', targetCreated);
+    const outcome = await this.executeWrite(review, synthetic, `${operationId}:recover`, targetAbsent ? Buffer.alloc(0) : (backup as Buffer), live, targetAbsent, 'restore', targetCreated);
     if (outcome.result.status !== 'ok') return { result: outcome.result, resolved: false };
 
     // REWIND (user-authorized, DECISIONS §21): re-open the path as a pending
@@ -1500,7 +1591,8 @@ export class ReviewEngine {
     // disk, so the next Deny's CAS (live == afterHash) matches exactly — no
     // false file-change detection. The next Deny still passes every gate
     // (undoGate: write mode, allowlist, repo identity, writer-active, capture
-    // complete, not ambiguous; plus live-match/CAS and undo-exact support).
+    // complete; the ambiguity gate applies unless the multi-agent relaxation
+    // is enabled; plus live-match/CAS and undo-exact support).
     try {
       await this.reopenAfterRestore(review, rel, op, this.now());
     } catch (err) {
@@ -1540,9 +1632,14 @@ export class ReviewEngine {
     const afterPresent = op.backupSha !== 'absent';
     const beforeHash = op.candidateSha === 'absent' ? null : op.candidateSha;
     const afterHash = afterPresent ? op.backupSha : null;
+    const restoredKind: FileChange['kind'] = beforeHash === null && afterHash !== null
+      ? 'created'
+      : beforeHash !== null && afterHash === null
+        ? 'deleted'
+        : 'modified';
     const restoredFile: FileChange = {
       relativePath: relPath,
-      kind: beforeHash === null && afterHash !== null ? 'created' : 'modified',
+      kind: restoredKind,
       beforeHash,
       afterHash,
       beforeSize: null,
@@ -1556,6 +1653,7 @@ export class ReviewEngine {
       status: 'pending',
       keptHunks: [],
       conflictReason: null,
+      mode: orig?.mode ?? op.mode ?? null,
     };
     const restoreReview: Review = {
       id: newId('rest'),
@@ -1614,6 +1712,15 @@ export class ReviewEngine {
    */
   async fixtureRun(input: { workspaceId: string; path: string; content?: string }):
     Promise<{ ok: true; reviewId: string; path: string } | { ok: false; reason: string; message: string }> {
+    // F1: the simulated writer is a test-only capability. Refuse unless the
+    // harness (or an explicit env opt-in in a live daemon) authorized it — a
+    // stock install must not expose an unrestricted production write path.
+    if (!this.deps.allowFixtureRun) {
+      return { ok: false, reason: 'fixture-disabled', message: 'Simulated turns are disabled outside the test harness.' };
+    }
+    if (this.storage.journal.hasCorruption()) {
+      return { ok: false, reason: 'journal-corrupt', message: 'The journal is damaged; simulated turns refused.' };
+    }
     const settings = await this.deps.getSettings();
     if (settings.undoMode === 'disabled') {
       return { ok: false, reason: 'write-disabled', message: 'Write mode is disabled; enable Fixture or Enabled mode in settings.' };
@@ -1700,10 +1807,14 @@ export class ReviewEngine {
    * (which is now informational only). The hard boundaries stay: write mode
    * must be `fixture` (allowlist-scoped) or `enabled` (every repository; the
    * allowlist is bypassed by design in that mode), the capture must be
-   * complete and unambiguous, repo identity must be unchanged, the agent must
-   * be idle, and (in the callers) the working tree must still match the
-   * reviewed after-state (live-match / CAS). A file the user edited after the
-   * turn is implicitly accepted and therefore never denyable (live-changed).
+   * complete, repo identity must be unchanged, the agent must be idle, and
+   * (in the callers) the working tree must still match the reviewed after-
+   * state (live-match / CAS). The ambiguity (multi-agent) boundary is
+   * conditional: it applies unless the user enabled `allowMultiAgentDeny`
+   * (opt-in, default off), in which case ONLY that gate is skipped and every
+   * other hard boundary — above all CAS — still applies. A file the user
+   * edited after the turn is implicitly accepted and therefore never
+   * denyable (live-changed).
    */
   private async undoGate(review: Review, workspaceId: string, expectedRevision: number | null, operationId: string):
     Promise<{ ok: boolean; reason: string; message: string; file?: FileChange; currentBytes?: Buffer | null }> {
@@ -1713,13 +1824,26 @@ export class ReviewEngine {
     if (!operationId) return { ok: false, reason: 'missing-idempotency-key', message: 'Missing idempotency key.' };
     if (!isValidOperationId(operationId)) return { ok: false, reason: 'invalid-idempotency-key', message: 'Idempotency key contains invalid characters.' };
     if (review.captureState !== 'complete') return { ok: false, reason: 'unsafe-capture', message: 'Capture is not complete; Undo unavailable.' };
-    if (review.ambiguous) return { ok: false, reason: 'unsafe-capture', message: 'Another agent may share this repository; Undo disabled.' };
+
+    // Settings resolve before the ambiguity gate so `allowMultiAgentDeny` can
+    // relax it. Every other write gate below still applies identically whether
+    // or not the relaxation is enabled — most importantly live-match/CAS, so a
+    // file the user edited after the turn is never rolled back.
+    const settings = await this.deps.getSettings();
+    if (review.ambiguous && settings.allowMultiAgentDeny !== true) {
+      return { ok: false, reason: 'unsafe-capture', message: 'Another agent may share this repository; Undo disabled.' };
+    }
+
+    // F7: never authorize a destructive write from a damaged journal — the op /
+    // capture records it relies on may be incomplete or corrupted.
+    if (this.storage.journal.hasCorruption()) {
+      return { ok: false, reason: 'journal-corrupt', message: 'The journal is damaged; Undo refused.' };
+    }
 
     // Write gate: never in disabled mode; fixture is allowlist-scoped, enabled
     // (real-project) mode authorizes every repository. All other gates below
     // (capture completeness, ambiguity, repo identity, writer-active, CAS)
     // apply identically in both write modes.
-    const settings = await this.deps.getSettings();
     if (settings.undoMode === 'disabled') return { ok: false, reason: 'write-disabled', message: 'Write mode is disabled.' };
     if (!isAllowedRoot(review.rootRealPath, settings)) {
       return { ok: false, reason: 'not-fixture', message: 'This repository is not on the fixture allowlist; Undo refused.' };
@@ -1824,6 +1948,15 @@ export class ReviewEngine {
     // Per-repository cross-process lock.
     const lockOk = await this.withRepoLock(review.rootRealPath, async () => {
       // 1. Re-read + verify current bytes under the lock (CAS).
+      // F5: capture the live target mode up front so a replace preserves the
+      // original permission bits / executable flag (a staging file is created
+      // owner-only, so without this the restored file would lose them).
+      let originalMode: number | null = null;
+      try {
+        originalMode = fs.statSync(abs).mode;
+      } catch {
+        originalMode = null;
+      }
       let currentBytes: Buffer | null = null;
       try {
         currentBytes = fs.readFileSync(abs);
@@ -1857,6 +1990,11 @@ export class ReviewEngine {
         backupSha,
         ts: this.now(),
         kind,
+        // F5: the mode of the state this write produced (the live/after mode at
+        // write time), so a later Restore can re-apply the denied after-state's
+        // permissions. The write itself restores `file.mode` (the mode of the
+        // target state) below.
+        mode: originalMode,
       };
       this.storage.ops.write(opRecord);
       this.storage.journal.append({ type: 'op-prepared', id: operationId, ts: this.now(), data: { reviewId: review.id, path: file.relativePath } });
@@ -1887,10 +2025,15 @@ export class ReviewEngine {
           return errorResult('delete-failed', `Could not delete file: ${redact(String(err))}`, operationId);
         }
       } else {
-        const temp = path.join(path.dirname(abs), `.${path.basename(abs)}.tr-${operationId.replace(/[^A-Za-z0-9_-]/g, '')}.tmp`);
+        // F3: stage the candidate in the target directory (same filesystem for
+        // an atomic rename) under an UNPREDICTABLE name with an exclusive,
+        // no-follow create — a hostile pre-placed symlink at a guessable name
+        // can no longer redirect the write outside the repo or overwrite an
+        // arbitrary file.
+        const temp = path.join(path.dirname(abs), `.${path.basename(abs)}.tr-${newId('tmp').replace(/-/g, '')}.tmp`);
         let fd: number;
         try {
-          fd = fs.openSync(temp, 'w', 0o600);
+          fd = openExclusiveNoFollow(temp);
         } catch (err) {
           this.storage.ops.write({ ...opRecord, state: 'aborted' });
           return errorResult('temp-failed', `Could not create temp file: ${redact(String(err))}`, operationId);
@@ -1924,6 +2067,15 @@ export class ReviewEngine {
         } catch (err) {
           this.storage.ops.write({ ...opRecord, state: 'recoverable' });
           return errorResult('readback-failed', `Could not read back file: ${redact(String(err))}`, operationId);
+        }
+        // 5b. F5: preserve permission bits / executable flag. Apply the mode of
+        // the state being written toward: `file.mode` is the baseline (for
+        // Deny) or the denied after-state (for Restore, via op.mode); for
+        // legacy reviews without a recorded mode, fall back to the live mode
+        // so the file never collapses to the staging default (0o600).
+        const targetMode = file.mode ?? originalMode ?? null;
+        if (targetMode !== null) {
+          try { fs.chmodSync(abs, targetMode & 0o7777); } catch { /* best effort */ }
         }
       }
 
@@ -1983,37 +2135,78 @@ export class ReviewEngine {
     const lockFile = path.join(lockDir, `${key}.lock`);
     const deadline = Date.now() + LOCK_TIMEOUT_MS;
     for (;;) {
+      let fd: number;
       try {
-        const fd = fs.openSync(lockFile, 'wx', 0o600);
-        fs.writeFileSync(fd, JSON.stringify({ pid: process.pid, ts: Date.now() }));
-        try { fs.closeSync(fd); } catch { /* noop */ }
-        try {
-          const result = await fn();
-          return { acquired: true, result };
-        } finally {
-          try { fs.unlinkSync(lockFile); } catch { /* noop */ }
-        }
+        fd = fs.openSync(lockFile, 'wx', 0o600);
       } catch (err) {
         const code = (err as NodeJS.ErrnoException).code;
         if (code !== 'EEXIST' && code !== 'EPERM') {
           throw err;
         }
-        // Stale lock recovery.
-        try {
-          const st = fs.statSync(lockFile);
-          if (Date.now() - st.mtimeMs > LOCK_STALE_MS) {
-            try { fs.unlinkSync(lockFile); } catch { /* ignore */ }
-            continue;
-          }
-        } catch {
+        // Stale-lock recovery (F8): reap the lock only when its owner is gone
+        // (or cannot be verified AND the lock is clearly old). A long-but-
+        // legitimate holder is never reaped — its heartbeat keeps the mtime
+        // fresh and its PID is alive — so stale handling can never let two
+        // writers hold the same lock concurrently.
+        if (this.isStaleLock(lockFile)) {
+          try { fs.unlinkSync(lockFile); } catch { /* ignore */ }
           continue;
         }
         if (Date.now() > deadline) {
           return { acquired: false, result: undefined as unknown as T };
         }
         await new Promise((r) => setTimeout(r, LOCK_RETRY_MS));
+        continue;
+      }
+      try {
+        fs.writeFileSync(fd, JSON.stringify({ pid: process.pid, ts: Date.now() }));
+      } catch (err) {
+        try { fs.closeSync(fd); } catch { /* noop */ }
+        try { fs.unlinkSync(lockFile); } catch { /* noop */ }
+        throw err;
+      }
+      try { fs.closeSync(fd); } catch { /* noop */ }
+      // Heartbeat while held: keep the lock mtime fresh so a long (but valid)
+      // write never looks stale to a concurrent process.
+      const heartbeat = setInterval(() => {
+        try { fs.utimesSync(lockFile, new Date(), new Date()); } catch { /* ignore */ }
+      }, LOCK_HEARTBEAT_MS);
+      try {
+        const result = await fn();
+        return { acquired: true, result };
+      } finally {
+        clearInterval(heartbeat);
+        try { fs.unlinkSync(lockFile); } catch { /* noop */ }
       }
     }
+  }
+
+  /**
+   * True when a contended lock is safe to reap (F8). Owner liveness is
+   * authoritative: a lock whose owner PID is readable and alive is NEVER stale
+   * (its heartbeat keeps the mtime fresh), because reaping it could let two
+   * writers hold the same lock concurrently. A dead owner is stale immediately
+   * (crash recovery). Only when the owner cannot be determined do we fall back
+   * to an age heuristic so a wedged lock cannot block writes forever.
+   */
+  private isStaleLock(lockFile: string): boolean {
+    let st: fs.Stats;
+    try {
+      st = fs.statSync(lockFile);
+    } catch {
+      return false; // gone; next loop retries the create
+    }
+    const age = Date.now() - st.mtimeMs;
+    try {
+      const raw = fs.readFileSync(lockFile, 'utf8');
+      const info = JSON.parse(raw) as { pid?: number };
+      if (typeof info.pid === 'number' && info.pid > 0) {
+        return !processAlive(info.pid); // stale iff the owner is dead
+      }
+    } catch {
+      // owner info unreadable/absent: rely on the age backstop below
+    }
+    return age > LOCK_STALE_MS;
   }
 }
 

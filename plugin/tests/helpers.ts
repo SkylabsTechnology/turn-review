@@ -74,6 +74,8 @@ export function makeHarness(fixtureRoot?: string, settings: SettingsSnapshot = f
     isAgentRunning: async () => false,
     findIdleAgent: async () => 'fixture-agent',
     onDenyApplied: deps.onDenyApplied,
+    // F1: the harness authorizes the simulated fixture writer explicitly.
+    allowFixtureRun: true,
   });
   engine.load();
   return {

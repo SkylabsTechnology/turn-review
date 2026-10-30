@@ -2,7 +2,11 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
+import os from 'node:os';
 import { makeRepo, makeHarness, writeFile, readFile, git, sha } from './helpers';
+import { Journal } from '../server/storage';
+import { digest } from '../server/util';
+import { trackerOpId } from '../shared/op-id';
 
 /** Build a complete review for repo `root` with a single modified file. */
 async function buildReview(harness: ReturnType<typeof makeHarness>, root: string, before: Buffer, after: Buffer) {
@@ -218,6 +222,131 @@ test('interrupted capture on restart is not fabricated as safe (C25)', async () 
     } finally {
       harness2.cleanup();
     }
+  } finally {
+    cleanup();
+    harness.cleanup();
+  }
+});
+
+test('F7: Journal detects corruption and rewrite refuses (no silent compaction over bad data)', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'tr-f7-'));
+  const journal = new Journal(root);
+  try {
+    journal.append({ type: 'review', id: 'rev-1', ts: new Date().toISOString(), data: { ok: true } });
+    // A partial write / torn line lands in the journal.
+    fs.appendFileSync(path.join(root, 'journal.jsonl'), '{"type":"review","id":"rev-2","ts":"2024', 'utf8');
+    fs.appendFileSync(path.join(root, 'journal.jsonl'), '\nnot-json-at-all\n', 'utf8');
+
+    const state = journal.readState();
+    assert.equal(state.corrupt, true);
+    assert.equal(state.corruptLines, 2);
+    assert.equal(state.records.length, 1, 'the valid record still parses');
+    assert.equal(journal.hasCorruption(), true);
+
+    // Compaction/rewrite must refuse rather than silently drop the corrupt line.
+    assert.throws(() => journal.rewrite(state.records), /journal-corrupt/);
+    // The raw journal on disk is untouched (no destructive rewrite happened).
+    const raw = fs.readFileSync(path.join(root, 'journal.jsonl'), 'utf8');
+    assert.ok(raw.includes('not-json-at-all'), 'corrupt line preserved on disk');
+    assert.ok(raw.includes('rev-1'));
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('F7: a corrupted journal blocks Undo (journal-corrupt) while readable reviews still load', async () => {
+  const { root, cleanup } = makeRepo();
+  const harness = makeHarness(root, { undoMode: 'fixture', fixtureRoots: [root], maxFileBytes: 1024 * 1024, retentionDays: 30, denyPaths: [] });
+  try {
+    const { captureId, review } = await buildReview(harness, root, Buffer.from('AAA\n'), Buffer.from('BBB\n'));
+    // Corrupt the journal AFTER a complete, readable review record.
+    fs.appendFileSync(path.join(harness.storage.root, 'journal.jsonl'), 'not-json-garbage\n', 'utf8');
+
+    // A new engine over the same storage still loads the valid review but the
+    // corruption flag is set, so any write is refused fail-closed.
+    const harness2 = makeHarness(root, { undoMode: 'fixture', fixtureRoots: [root], maxFileBytes: 1024 * 1024, retentionDays: 30, denyPaths: [] }, harness.storage);
+    try {
+      const review2 = harness2.engine.get(captureId)!;
+      assert.ok(review2, 'valid review records still load');
+      const undo = await harness2.engine.undoFile(captureId, 'ws-1', review2.revision, 'op-f7', 'f.txt', null, false);
+      assert.equal(undo.result.status, 'refused');
+      assert.equal(undo.result.reason, 'journal-corrupt');
+    } finally {
+      harness2.cleanup();
+    }
+  } finally {
+    cleanup();
+    harness.cleanup();
+  }
+});
+
+test('F8: a lock file whose owner PID is dead is reaped immediately (no stale-lock wedge)', async () => {
+  const { root, cleanup } = makeRepo();
+  writeFile(root, 'a.txt', 'A0\n');
+  git(root, ['add', 'a.txt']);
+  git(root, ['commit', '-m', 'add a']);
+  const harness = makeHarness(root);
+  try {
+    // Simulate a crashed holder: the lock exists, its mtime is RECENT (so the
+    // old age-based heuristic would keep waiting) but the owner PID is dead.
+    const lockDir = path.join(harness.storage.root, 'locks');
+    fs.mkdirSync(lockDir, { recursive: true });
+    const key = digest(root).slice(0, 16);
+    const lockFile = path.join(lockDir, `${key}.lock`);
+    fs.writeFileSync(lockFile, JSON.stringify({ pid: 2147483647, ts: Date.now() }), 'utf8');
+
+    const { captureId } = await buildReview(harness, root, Buffer.from('AAA\n'), Buffer.from('BBB\n'));
+    void captureId;
+    const files = await harness.engine.trackerList('ws-1');
+    const start = Date.now();
+    const deny = await harness.engine.trackerDeny('ws-1', 'f.txt', trackerOpId('ws-1', 'deny', 'f.txt', files[0].currentHash));
+    const elapsed = Date.now() - start;
+    assert.equal(deny.result.status, 'ok');
+    assert.deepEqual(readFile(root, 'f.txt'), Buffer.from('AAA\n'));
+    assert.ok(elapsed < 5_000, `dead-owner lock must be reaped immediately; took ${elapsed}ms (would be 20s under the old age heuristic)`);
+  } finally {
+    cleanup();
+    harness.cleanup();
+  }
+});
+
+test('F8: a lock whose owner is ALIVE is never reaped even when old; dead/unknown owners are handled', async () => {
+  const { root, cleanup } = makeRepo();
+  const harness = makeHarness(root);
+  try {
+    const lockDir = path.join(harness.storage.root, 'locks');
+    fs.mkdirSync(lockDir, { recursive: true });
+    const isStale = (engine: typeof harness.engine, f: string): boolean =>
+      (engine as unknown as { isStaleLock(f: string): boolean }).isStaleLock(f);
+    const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60 * 1000);
+    const mk = (name: string, body: string, old = false): string => {
+      const p = path.join(lockDir, name);
+      fs.writeFileSync(p, body, 'utf8');
+      if (old) fs.utimesSync(p, twoHoursAgo, twoHoursAgo);
+      return p;
+    };
+
+    // LIVE owner (this process) with a very old mtime -> NEVER reaped.
+    // Regression: the old code reaped any lock older than the 1h backstop
+    // even when its owner was alive, risking a double writer.
+    const liveOld = mk('live-old.lock', JSON.stringify({ pid: process.pid, ts: Date.now() - 2 * 60 * 60 * 1000 }), true);
+    assert.equal(isStale(harness.engine, liveOld), false, 'a live-owner lock must never be reaped');
+
+    // LIVE owner with a fresh mtime -> never reaped.
+    const liveFresh = mk('live-fresh.lock', JSON.stringify({ pid: process.pid, ts: Date.now() }));
+    assert.equal(isStale(harness.engine, liveFresh), false);
+
+    // DEAD owner (impossible PID) -> stale immediately regardless of age.
+    const deadFresh = mk('dead-fresh.lock', JSON.stringify({ pid: 2147483647, ts: Date.now() }));
+    assert.equal(isStale(harness.engine, deadFresh), true, 'a dead-owner lock must be reaped immediately');
+
+    // UNKNOWN owner (unreadable/absent info) + old mtime -> reaped by the age backstop.
+    const unknownOld = mk('unknown-old.lock', 'not-json', true);
+    assert.equal(isStale(harness.engine, unknownOld), true, 'an unknown-owner old lock must be reaped');
+
+    // UNKNOWN owner + fresh mtime -> not reaped.
+    const unknownFresh = mk('unknown-fresh.lock', 'not-json');
+    assert.equal(isStale(harness.engine, unknownFresh), false);
   } finally {
     cleanup();
     harness.cleanup();

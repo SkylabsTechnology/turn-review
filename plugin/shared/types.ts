@@ -84,6 +84,12 @@ export interface FileChange {
   status: FileReviewStatus;
   keptHunks: string[];
   conflictReason: string | null;
+  /**
+   * Permission bits (stat.mode) of the baseline (or, for created files, the
+   * after) state. Re-applied when a rollback/recovery recreates the file so
+   * executable flags and permissions survive a Deny/Restore (F5).
+   */
+  mode?: number | null;
 }
 
 export interface Review {
@@ -183,6 +189,8 @@ export interface PluginInfo {
   writeEnabled: boolean;
   fixtureRoots: string[];
   allowAllProjects: boolean;
+  /** When true, rollback is allowed on captures flagged for overlapping agents. */
+  allowMultiAgentDeny: boolean;
   maxFileBytes: number;
   retentionDays: number;
   maxProjectBytes: number;

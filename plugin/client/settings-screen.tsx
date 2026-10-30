@@ -79,6 +79,10 @@ export function TurnReviewSettingsScreen({ theme }: PluginSurfaceProps) {
     await save(r, { ...r.values, allowAllProjects: allowAll }, allowAll ? 'Rollback now allowed for all projects.' : 'Rollback restricted to the selected projects.');
   }, [save]);
 
+  const saveMultiAgent = useCallback(async (r: Ready, allow: boolean) => {
+    await save(r, { ...r.values, allowMultiAgentDeny: allow }, allow ? 'Rollback allowed on multi-agent turns — concurrent edits to the same file may be reverted.' : 'Rollback on multi-agent turns disabled (strict).');
+  }, [save]);
+
   const addProject = useCallback(async (r: Ready, root: string) => {
     if (!root) {
       setNotice('Select a project to add first.');
@@ -210,6 +214,13 @@ export function TurnReviewSettingsScreen({ theme }: PluginSurfaceProps) {
             </Text>
           </SettingsRow>
         )}
+        <SettingsRow label="Multi-agent rollback" hint="OFF (default) = when another agent overlaps in the same repository, rollback stays disabled there (attribution unclear). ON = rollback is allowed on those turns too. Either way, a file you edit after the turn is never rolled back — it becomes the dismiss workflow. Warning: with overlapping agents, Deny restores the byte-exact before-state, so it may also revert another agent's concurrent edits to the same file.">
+          <SettingsSwitch
+            value={current.values.allowMultiAgentDeny === true}
+            onValueChange={(v) => void saveMultiAgent(current, v)}
+            label="Allow rollback in multi-agent repositories"
+          />
+        </SettingsRow>
         <SettingsRow label="Max file bytes" hint="Per-file raw capture cap (1 MiB default).">
           <SettingsInput
             ref={bytesRef}

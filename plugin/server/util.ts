@@ -1,4 +1,34 @@
 import { createHash, randomUUID } from 'node:crypto';
+import fs from 'node:fs';
+
+/**
+ * POSIX-only no-follow flag for `open`. `undefined` on Windows, where the
+ * equivalent protection is a realpath containment check after open.
+ */
+const O_NOFOLLOW: number | undefined = (fs.constants as Record<string, number | undefined>).O_NOFOLLOW;
+
+/**
+ * Open an existing file read-only, refusing to follow a symlink where the
+ * platform supports it (O_NOFOLLOW). On Windows the caller must still verify
+ * containment via realpath after open.
+ */
+export function openReadNoFollow(file: string): number {
+  let flags = fs.constants.O_RDONLY;
+  if (O_NOFOLLOW !== undefined) flags |= O_NOFOLLOW;
+  return fs.openSync(file, flags);
+}
+
+/**
+ * Open for exclusive write (create-new). O_EXCL fails if the path exists, and
+ * O_NOFOLLOW (POSIX) refuses a symlink at the path; combined with an
+ * unpredictable name this defeats symlink pre-placement attacks on staging
+ * files. On Windows the exclusive create is the primary defense.
+ */
+export function openExclusiveNoFollow(file: string, mode = 0o600): number {
+  let flags = fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_WRONLY;
+  if (O_NOFOLLOW !== undefined) flags |= O_NOFOLLOW;
+  return fs.openSync(file, flags, mode);
+}
 
 export const digest = (bytes: Buffer | string): string =>
   createHash('sha256').update(bytes).digest('hex');
